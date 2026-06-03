@@ -9,18 +9,18 @@
 #include "pantalla.h"
 
 // Hardware
-Adafruit_SSD1306     oled(128, 64, &Wire, -1);
-TwoWire              I2CPCA = TwoWire(1);
+Adafruit_SSD1306        oled(128, 64, &Wire, -1);
+TwoWire                 I2CPCA = TwoWire(1);
 Adafruit_PWMServoDriver pca(0x40, I2CPCA);
 
 // Gamepad
 GamepadPtr myGamepad;
 
 // Estado global
-int  modo       = MODO_MENU;
-int  menuSel    = 0;
+int  modo        = MODO_MENU;
+int  menuSel     = 0;
 int  indiceCanal = 0;
-bool pcaOk      = false;
+bool pcaOk       = false;
 
 // Estado botones
 bool triAnt   = false;
@@ -34,6 +34,127 @@ bool dpadUAnt = false;
 bool dpadDAnt = false;
 bool dpadRAnt = false;
 bool dpadLAnt = false;
+
+// Emergencia
+volatile bool emergenciaFlag = false;
+
+// =========================
+// DUAL CORE
+// =========================
+
+SemaphoreHandle_t mutexOled;
+
+// Datos que la tarea de pantalla necesita leer
+// Se copian bajo mutex para evitar race conditions
+struct EstadoPantalla
+{
+  int  modo;
+  int  menuSel;
+  int  indiceCanal;
+  bool ctrOk;
+  // debug
+  int  debugModo;
+  int  debugIdxPantalla;
+  int  debugPos;
+  int  debugSel;
+  bool debugMostrarNumero;
+  // analogico
+  int  posActual[NUM_CANALES];
+  // auto15
+  int  posAuto15;
+  int  debugDelay;
+  // config
+  // (usa canales[] directamente — protegido por mutex)
+};
+
+volatile bool pantallaActualizar = false;
+EstadoPantalla snapPantalla;
+
+void solicitarPantalla()
+{
+  pantallaActualizar = true;
+}
+
+// Tarea del Core 0 — solo dibuja la pantalla
+void tareaPantalla(void* param)
+{
+  for(;;)
+  {
+    if(pantallaActualizar)
+    {
+      pantallaActualizar = false;
+
+      // Tomar snapshot bajo mutex
+      EstadoPantalla s;
+      if(xSemaphoreTake(mutexOled, pdMS_TO_TICKS(10)))
+      {
+        s = snapPantalla;
+        xSemaphoreGive(mutexOled);
+      }
+      else
+      {
+        vTaskDelay(1);
+        continue;
+      }
+
+      // Dibujar segun modo
+      switch(s.modo)
+      {
+        case MODO_MENU:
+          pantalla_menu(s.menuSel);
+          break;
+        case MODO_CONTROL:
+          pantalla_control(
+            s.indiceCanal,
+            s.posActual[s.indiceCanal],
+            selManual[s.indiceCanal],
+            s.ctrOk
+          );
+          break;
+        case MODO_AUTO15:
+          pantalla_auto15(s.posAuto15, s.ctrOk);
+          break;
+        case MODO_ANALOGICO:
+          pantalla_analogico(s.ctrOk);
+          break;
+        case MODO_CONFIG:
+          pantalla_config(s.indiceCanal, s.ctrOk);
+          break;
+        case MODO_DEBUG:
+          if(s.debugModo == 1)
+            pantalla_debug_auto(s.debugPos, s.ctrOk);
+          else
+            pantalla_debug(
+              s.debugIdxPantalla,
+              s.debugPos,
+              s.debugSel,
+              s.ctrOk,
+              s.debugMostrarNumero,
+              s.debugDelay
+            );
+          break;
+      }
+    }
+    vTaskDelay(1);  // ceder tiempo al sistema
+  }
+}
+
+// Actualiza el snapshot y pide redibujo
+void actualizarSnap()
+{
+  if(xSemaphoreTake(mutexOled, pdMS_TO_TICKS(10)))
+  {
+    snapPantalla.modo        = modo;
+    snapPantalla.menuSel     = menuSel;
+    snapPantalla.indiceCanal = indiceCanal;
+    snapPantalla.ctrOk       = myGamepad && myGamepad->isConnected();
+    snapPantalla.posAuto15   = posAuto15;
+    for(int i = 0; i < NUM_CANALES; i++)
+      snapPantalla.posActual[i] = posActual[i];
+    xSemaphoreGive(mutexOled);
+  }
+  solicitarPantalla();
+}
 
 // =========================
 
@@ -50,7 +171,7 @@ bool chequearHome()
   {
     homeAnt = home;
     modo = MODO_MENU;
-    pantalla_menu(menuSel);
+    actualizarSnap();
     return true;
   }
   homeAnt = home;
@@ -61,12 +182,14 @@ void onConnectedGamepad(GamepadPtr gp)
 {
   myGamepad = gp;
   Serial.println("Control conectado");
+  actualizarSnap();
 }
 
 void onDisconnectedGamepad(GamepadPtr gp)
 {
   myGamepad = nullptr;
   Serial.println("Control desconectado");
+  actualizarSnap();
 }
 
 // =========================
@@ -77,11 +200,9 @@ void loopMenu()
 {
   BP32.update();
 
-  // Navegacion con dpad (funciona aunque el control no este conectado
-  // solo cuando si esta conectado)
   if(!ctrOk())
   {
-    pantalla_menu(menuSel);
+    actualizarSnap();
     return;
   }
 
@@ -94,30 +215,12 @@ void loopMenu()
   bool dpadL = (dpad & 0x08);
   bool x     = (botones & 0x0001);
 
-  // Grilla 2x2: izq/der cambia columna, arriba/abajo cambia fila
-  if(dpadR && !dpadRAnt)
-  {
-    if(menuSel % 2 == 0) menuSel++;
-    pantalla_menu(menuSel);
-  }
+  bool cambio = false;
 
-  if(dpadL && !dpadLAnt)
-  {
-    if(menuSel % 2 == 1) menuSel--;
-    pantalla_menu(menuSel);
-  }
-
-  if(dpadD && !dpadDAnt)
-  {
-    if(menuSel < 2) menuSel += 2;
-    pantalla_menu(menuSel);
-  }
-
-  if(dpadU && !dpadUAnt)
-  {
-    if(menuSel >= 2) menuSel -= 2;
-    pantalla_menu(menuSel);
-  }
+  if(dpadR && !dpadRAnt) { if(menuSel % 2 == 0) menuSel++; cambio = true; }
+  if(dpadL && !dpadLAnt) { if(menuSel % 2 == 1) menuSel--; cambio = true; }
+  if(dpadD && !dpadDAnt) { if(menuSel < 2) menuSel += 2;   cambio = true; }
+  if(dpadU && !dpadUAnt) { if(menuSel >= 2) menuSel -= 2;  cambio = true; }
 
   if(x && !xAnt)
   {
@@ -125,13 +228,12 @@ void loopMenu()
     {
       case MENU_PROGRAMA:
       case MENU_JUEGO:
-        // En desarrollo — no hace nada todavia
         break;
 
       case MENU_CONTROL:
         if(!ctrOk())
         {
-          // Aviso: no hay control conectado
+          // Aviso sin bloquear — lo dibujamos directamente
           oled.clearDisplay();
           oled.setTextColor(SSD1306_WHITE);
           navbar(false);
@@ -142,19 +244,23 @@ void loopMenu()
           oled.print("conectado");
           oled.display();
           delay(1500);
-          pantalla_menu(menuSel);
+          cambio = true;
         }
         else
         {
           modo = MODO_ANALOGICO;
+          cambio = true;
         }
         break;
 
       case MENU_DEBUG:
         modo = MODO_DEBUG;
+        cambio = true;
         break;
     }
   }
+
+  if(cambio) actualizarSnap();
 
   dpadUAnt = dpadU;
   dpadDAnt = dpadD;
@@ -172,12 +278,7 @@ void loopControl()
   BP32.update();
 
   bool ok = ctrOk();
-
-  if(!ok)
-  {
-    pantalla_control(indiceCanal, posActual[indiceCanal], selManual[indiceCanal], false);
-    return;
-  }
+  if(!ok) { actualizarSnap(); return; }
 
   uint16_t botones = myGamepad->buttons();
   uint8_t  dpad    = myGamepad->dpad();
@@ -198,58 +299,35 @@ void loopControl()
 
   if(chequearHome()) return;
 
-  // L1/R1 = cambiar canal
+  bool cambio = false;
+
   if(l1 && !l1Ant)
   {
     indiceCanal--;
-    // Saltar el canal 15 (auto)
     if(indiceCanal < 0) indiceCanal = NUM_CANALES - 2;
-    pantalla_control(indiceCanal, posActual[indiceCanal], selManual[indiceCanal], ok);
+    cambio = true;
   }
 
   if(r1 && !r1Ant)
   {
     indiceCanal++;
     if(indiceCanal >= NUM_CANALES - 1) indiceCanal = 0;
-    pantalla_control(indiceCanal, posActual[indiceCanal], selManual[indiceCanal], ok);
+    cambio = true;
   }
 
-  // Dpad: cambia seleccion
-  if(dpadU && !dpadUAnt)
-  {
-    selManual[indiceCanal]++;
-    if(selManual[indiceCanal] > limMax) selManual[indiceCanal] = limMax;
-    pantalla_control(indiceCanal, posActual[indiceCanal], selManual[indiceCanal], ok);
-  }
+  if(dpadU && !dpadUAnt) { selManual[indiceCanal] = min(selManual[indiceCanal] + 1,  limMax); cambio = true; }
+  if(dpadD && !dpadDAnt) { selManual[indiceCanal] = max(selManual[indiceCanal] - 1,  limMin); cambio = true; }
+  if(dpadR && !dpadRAnt) { selManual[indiceCanal] = min(selManual[indiceCanal] + 10, limMax); cambio = true; }
+  if(dpadL && !dpadLAnt) { selManual[indiceCanal] = max(selManual[indiceCanal] - 10, limMin); cambio = true; }
 
-  if(dpadD && !dpadDAnt)
-  {
-    selManual[indiceCanal]--;
-    if(selManual[indiceCanal] < limMin) selManual[indiceCanal] = limMin;
-    pantalla_control(indiceCanal, posActual[indiceCanal], selManual[indiceCanal], ok);
-  }
-
-  if(dpadR && !dpadRAnt)
-  {
-    selManual[indiceCanal] += 10;
-    if(selManual[indiceCanal] > limMax) selManual[indiceCanal] = limMax;
-    pantalla_control(indiceCanal, posActual[indiceCanal], selManual[indiceCanal], ok);
-  }
-
-  if(dpadL && !dpadLAnt)
-  {
-    selManual[indiceCanal] -= 10;
-    if(selManual[indiceCanal] < limMin) selManual[indiceCanal] = limMin;
-    pantalla_control(indiceCanal, posActual[indiceCanal], selManual[indiceCanal], ok);
-  }
-
-  // X = mover servo
   if(x && !xAnt)
   {
     posActual[indiceCanal] = selManual[indiceCanal];
     moverCanalCompleto(indiceCanal, posActual[indiceCanal]);
-    pantalla_control(indiceCanal, posActual[indiceCanal], selManual[indiceCanal], ok);
+    cambio = true;
   }
+
+  if(cambio) actualizarSnap();
 
   triAnt   = false;
   cirAnt   = cir;
@@ -272,15 +350,13 @@ void loopControl()
 void loopAuto15()
 {
   BP32.update();
-
   chequearHome();
 
   int posAntes = posAuto15;
   tickAuto15();
 
-  // Solo redibujar cuando el servo realmente avanzó
   if(posAuto15 != posAntes)
-    pantalla_auto15(posAuto15, ctrOk());
+    actualizarSnap();
 }
 
 // =========================
@@ -295,8 +371,6 @@ void loopConfig()
   uint16_t botones = myGamepad->buttons();
   uint8_t  dpad    = myGamepad->dpad();
 
-  bool cir  = (botones & 0x0002);
-  bool cuad = (botones & 0x0004);
   bool l1   = (botones & 0x0010);
   bool r1   = (botones & 0x0020);
 
@@ -307,55 +381,34 @@ void loopConfig()
 
   if(chequearHome()) return;
 
-  // L1/R1 = cambiar canal a configurar
-  if(l1 && !l1Ant)
-  {
-    indiceCanal--;
-    if(indiceCanal < 0) indiceCanal = NUM_CANALES - 2;
-    pantalla_config(indiceCanal, true);
-  }
+  bool cambio = false;
 
-  if(r1 && !r1Ant)
-  {
-    indiceCanal++;
-    if(indiceCanal >= NUM_CANALES - 1) indiceCanal = 0;
-    pantalla_config(indiceCanal, true);
-  }
+  if(l1 && !l1Ant) { indiceCanal = (indiceCanal - 1 + NUM_CANALES - 1) % (NUM_CANALES - 1); cambio = true; }
+  if(r1 && !r1Ant) { indiceCanal = (indiceCanal + 1) % (NUM_CANALES - 1);                   cambio = true; }
 
-  // Dpad arriba/abajo = ajusta limite maximo
   if(dpadU && !dpadUAnt)
   {
-    canales[indiceCanal].limMax++;
-    if(canales[indiceCanal].limMax > 180) canales[indiceCanal].limMax = 180;
-    pantalla_config(indiceCanal, true);
+    canales[indiceCanal].limMax = min(canales[indiceCanal].limMax + 1, 180);
+    cambio = true;
   }
-
   if(dpadD && !dpadDAnt)
   {
-    canales[indiceCanal].limMax--;
-    if(canales[indiceCanal].limMax <= canales[indiceCanal].limMin)
-      canales[indiceCanal].limMax = canales[indiceCanal].limMin + 1;
-    pantalla_config(indiceCanal, true);
+    canales[indiceCanal].limMax = max(canales[indiceCanal].limMax - 1, canales[indiceCanal].limMin + 1);
+    cambio = true;
   }
-
-  // Dpad derecha/izquierda = ajusta limite minimo
   if(dpadR && !dpadRAnt)
   {
-    canales[indiceCanal].limMin++;
-    if(canales[indiceCanal].limMin >= canales[indiceCanal].limMax)
-      canales[indiceCanal].limMin = canales[indiceCanal].limMax - 1;
-    pantalla_config(indiceCanal, true);
+    canales[indiceCanal].limMin = min(canales[indiceCanal].limMin + 1, canales[indiceCanal].limMax - 1);
+    cambio = true;
   }
-
   if(dpadL && !dpadLAnt)
   {
-    canales[indiceCanal].limMin--;
-    if(canales[indiceCanal].limMin < 0) canales[indiceCanal].limMin = 0;
-    pantalla_config(indiceCanal, true);
+    canales[indiceCanal].limMin = max(canales[indiceCanal].limMin - 1, 0);
+    cambio = true;
   }
 
-  cirAnt   = cir;
-  cuadAnt  = cuad;
+  if(cambio) actualizarSnap();
+
   l1Ant    = l1;
   r1Ant    = r1;
   dpadUAnt = dpadU;
@@ -370,20 +423,36 @@ void loopConfig()
 // DEBUG
 // =========================
 
-// Sub-modos del debug
 #define DEBUG_CANALES 0
 #define DEBUG_AUTO    1
 
 int  debugModo          = DEBUG_CANALES;
-int  debugCanal         = 0;   // indice en canales[] cuando mostrarNumero=false
-int  debugCanalRaw      = 0;   // numero de canal PCA (0-15) cuando mostrarNumero=true
+int  debugCanal         = 0;
+int  debugCanalRaw      = 0;
 int  debugSel           = 90;
 int  debugPos           = 90;
 bool debugMostrarNumero = false;
 
-// Auto debug (canal 15)
-int   debugFase    = 0;
+int   debugFase         = 0;
 unsigned long debugUltimoPaso = 0;
+int   debugDelay        = 20;  // ms entre comandos al servo
+
+void actualizarSnapDebug()
+{
+  if(xSemaphoreTake(mutexOled, pdMS_TO_TICKS(10)))
+  {
+    snapPantalla.modo               = modo;
+    snapPantalla.ctrOk              = ctrOk();
+    snapPantalla.debugModo          = debugModo;
+    snapPantalla.debugIdxPantalla   = debugMostrarNumero ? debugCanalRaw : debugCanal;
+    snapPantalla.debugPos           = debugPos;
+    snapPantalla.debugSel           = debugSel;
+    snapPantalla.debugMostrarNumero = debugMostrarNumero;
+    snapPantalla.debugDelay         = debugDelay;
+    xSemaphoreGive(mutexOled);
+  }
+  solicitarPantalla();
+}
 
 void loopDebug()
 {
@@ -399,70 +468,42 @@ void loopDebug()
     return;
   }
 
-  // =====================
-  // SUB-MODO AUTO
-  // =====================
   if(debugModo == DEBUG_AUTO)
   {
     if(ok)
     {
       uint16_t botones = myGamepad->buttons();
-      bool cir  = (botones & 0x0002);
-      bool cuad = (botones & 0x0004);
+      bool cir = (botones & 0x0002);
 
-      // Circulo = detener y volver a canales
       if(cir && !cirAnt)
       {
         pca.setPWM(15, 0, 0);
         debugModo = DEBUG_CANALES;
-        pantalla_debug(debugMostrarNumero ? debugCanalRaw : debugCanal, debugPos, debugSel, ok, debugMostrarNumero);
+        actualizarSnapDebug();
       }
-      cirAnt  = cir;
-      cuadAnt = cuad;
+      cirAnt = cir;
     }
 
-    // Tick automatico canal 15
     unsigned long ahora = millis();
     if(ahora - debugUltimoPaso >= INTERVALO_AUTO)
     {
       debugUltimoPaso = ahora;
+      int posAntes = debugPos;
 
-      if(debugFase == 0)
-      {
-        debugPos++;
-        if(debugPos >= 180) { debugPos = 180; debugFase = 1; debugUltimoPaso = ahora + 500; }
-      }
-      else if(debugFase == 1)
-      {
-        debugPos--;
-        if(debugPos <= 90)  { debugPos = 90;  debugFase = 2; debugUltimoPaso = ahora + 300; }
-      }
-      else if(debugFase == 2)
-      {
-        debugPos--;
-        if(debugPos <= 0)   { debugPos = 0;   debugFase = 3; debugUltimoPaso = ahora + 500; }
-      }
-      else if(debugFase == 3)
-      {
-        debugPos++;
-        if(debugPos >= 90)  { debugPos = 90;  debugFase = 0; debugUltimoPaso = ahora + 300; }
-      }
+      if(debugFase == 0) { debugPos++; if(debugPos >= 180) { debugPos = 180; debugFase = 1; debugUltimoPaso = ahora + 500; } }
+      else if(debugFase == 1) { debugPos--; if(debugPos <= 90)  { debugPos = 90;  debugFase = 2; debugUltimoPaso = ahora + 300; } }
+      else if(debugFase == 2) { debugPos--; if(debugPos <= 0)   { debugPos = 0;   debugFase = 3; debugUltimoPaso = ahora + 500; } }
+      else if(debugFase == 3) { debugPos++; if(debugPos >= 90)  { debugPos = 90;  debugFase = 0; debugUltimoPaso = ahora + 300; } }
 
       pca.setPWM(15, 0, angleToPulse(debugPos));
+
+      if(debugPos != posAntes)
+        actualizarSnapDebug();
     }
-
-    pantalla_debug_auto(debugPos, ok);
     return;
   }
 
-  // =====================
-  // SUB-MODO CANALES
-  // =====================
-  if(!ok)
-  {
-    pantalla_debug(debugMostrarNumero ? debugCanalRaw : debugCanal, debugPos, debugSel, false, debugMostrarNumero);
-    return;
-  }
+  if(!ok) { actualizarSnapDebug(); return; }
 
   uint16_t botones = myGamepad->buttons();
   uint8_t  dpad    = myGamepad->dpad();
@@ -479,122 +520,92 @@ void loopDebug()
   bool dpadR = (dpad & 0x04);
   bool dpadL = (dpad & 0x08);
 
-  // L1/R1 = cambiar canal
+  int l2val = myGamepad->brake();
+  int r2val = myGamepad->throttle();
+
+  bool cambio = false;
+
+  // L2 = bajar delay (mas rapido), R2 = subir delay (mas lento)
+  static unsigned long ultimoAjusteDelay = 0;
+  if(millis() - ultimoAjusteDelay > 200)
+  {
+    if(l2val > 50)
+    {
+      debugDelay = max(5, debugDelay - 5);
+      ultimoAjusteDelay = millis();
+      cambio = true;
+      Serial.print("debugDelay: "); Serial.println(debugDelay);
+    }
+    else if(r2val > 50)
+    {
+      debugDelay = min(200, debugDelay + 5);
+      ultimoAjusteDelay = millis();
+      cambio = true;
+      Serial.print("debugDelay: "); Serial.println(debugDelay);
+    }
+  }
+
   if(l1 && !l1Ant)
   {
-    if(debugMostrarNumero)
-    {
-      debugCanalRaw--;
-      if(debugCanalRaw < 0) debugCanalRaw = 15;
-    }
-    else
-    {
-      debugCanal--;
-      if(debugCanal < 0) debugCanal = NUM_CANALES - 1;
-    }
+    if(debugMostrarNumero) { debugCanalRaw = (debugCanalRaw - 1 + 16) % 16; }
+    else                   { debugCanal    = (debugCanal - 1 + NUM_CANALES) % NUM_CANALES; }
     debugSel = debugPos;
-    int idx = debugMostrarNumero ? debugCanalRaw : debugCanal;
-    pantalla_debug(idx, debugPos, debugSel, ok, debugMostrarNumero);
+    cambio = true;
   }
 
   if(r1 && !r1Ant)
   {
-    if(debugMostrarNumero)
-    {
-      debugCanalRaw++;
-      if(debugCanalRaw > 15) debugCanalRaw = 0;
-    }
-    else
-    {
-      debugCanal++;
-      if(debugCanal >= NUM_CANALES) debugCanal = 0;
-    }
+    if(debugMostrarNumero) { debugCanalRaw = (debugCanalRaw + 1) % 16; }
+    else                   { debugCanal    = (debugCanal + 1) % NUM_CANALES; }
     debugSel = debugPos;
-    int idx = debugMostrarNumero ? debugCanalRaw : debugCanal;
-    pantalla_debug(idx, debugPos, debugSel, ok, debugMostrarNumero);
+    cambio = true;
   }
 
-  // Analogo izquierdo X y dpad = ajustar seleccion
   int lx = myGamepad->axisX();
   if(abs(lx) > DEADZONE)
   {
     int paso = map(abs(lx), DEADZONE, 512, 1, 4);
-    if(lx > 0) debugSel += paso;
-    else        debugSel -= paso;
-    debugSel = constrain(debugSel, 0, 180);
-    pantalla_debug(debugMostrarNumero ? debugCanalRaw : debugCanal, debugPos, debugSel, ok, debugMostrarNumero);
+    debugSel = constrain(debugSel + (lx > 0 ? paso : -paso), 0, 180);
+    cambio = true;
   }
 
-  if(dpadR && !dpadRAnt)
-  {
-    debugSel += 10;
-    debugSel = constrain(debugSel, 0, 180);
-    pantalla_debug(debugMostrarNumero ? debugCanalRaw : debugCanal, debugPos, debugSel, ok, debugMostrarNumero);
-  }
+  if(dpadR && !dpadRAnt) { debugSel = constrain(debugSel + 10, 0, 180); cambio = true; }
+  if(dpadL && !dpadLAnt) { debugSel = constrain(debugSel - 10, 0, 180); cambio = true; }
+  if(dpadU && !dpadUAnt) { debugSel = constrain(debugSel + 1,  0, 180); cambio = true; }
+  if(dpadD && !dpadDAnt) { debugSel = constrain(debugSel - 1,  0, 180); cambio = true; }
 
-  if(dpadL && !dpadLAnt)
-  {
-    debugSel -= 10;
-    debugSel = constrain(debugSel, 0, 180);
-    pantalla_debug(debugMostrarNumero ? debugCanalRaw : debugCanal, debugPos, debugSel, ok, debugMostrarNumero);
-  }
+  int canalFisico = debugMostrarNumero ? debugCanalRaw : canales[debugCanal].numero;
 
-  if(dpadU && !dpadUAnt)
-  {
-    debugSel++;
-    debugSel = constrain(debugSel, 0, 180);
-    pantalla_debug(debugMostrarNumero ? debugCanalRaw : debugCanal, debugPos, debugSel, ok, debugMostrarNumero);
-  }
-
-  if(dpadD && !dpadDAnt)
-  {
-    debugSel--;
-    debugSel = constrain(debugSel, 0, 180);
-    pantalla_debug(debugMostrarNumero ? debugCanalRaw : debugCanal, debugPos, debugSel, ok, debugMostrarNumero);
-  }
-
-  // Canal fisico activo segun modo
-  int canalFisico = debugMostrarNumero
-    ? debugCanalRaw
-    : canales[debugCanal].numero;
-  int idxPantalla = debugMostrarNumero ? debugCanalRaw : debugCanal;
-
-  // X = mover servo al angulo seleccionado (sin timeout)
   if(x && !xAnt)
   {
     debugPos = debugSel;
     pca.setPWM(canalFisico, 0, angleToPulse(debugPos));
-    pantalla_debug(idxPantalla, debugPos, debugSel, ok, debugMostrarNumero);
+    cambio = true;
   }
 
-  // Circulo = apagar PWM del canal actual
   if(cir && !cirAnt)
   {
     pca.setPWM(canalFisico, 0, 0);
-    pantalla_debug(idxPantalla, debugPos, debugSel, ok, debugMostrarNumero);
+    cambio = true;
   }
 
-  // Cuadrado = entrar a modo automatico canal 15
   if(cuad && !cuadAnt)
   {
-    debugModo  = DEBUG_AUTO;
-    debugPos   = 90;
-    debugFase  = 0;
+    debugModo = DEBUG_AUTO;
+    debugPos  = 90;
+    debugFase = 0;
     debugUltimoPaso = millis();
-    pantalla_debug_auto(debugPos, ok);
+    cambio = true;
   }
 
-  // Triangulo = toggle entre nombre de pieza y numero de canal
   if(tri && !triAnt)
   {
     debugMostrarNumero = !debugMostrarNumero;
-    if(debugMostrarNumero)
-      debugCanalRaw = canales[debugCanal].numero;
-    else
-      debugCanalRaw = 0;
-    int idx = debugMostrarNumero ? debugCanalRaw : debugCanal;
-    pantalla_debug(idx, debugPos, debugSel, ok, debugMostrarNumero);
+    debugCanalRaw = debugMostrarNumero ? canales[debugCanal].numero : 0;
+    cambio = true;
   }
+
+  if(cambio) actualizarSnapDebug();
 
   xAnt     = x;
   cirAnt   = cir;
@@ -607,7 +618,7 @@ void loopDebug()
   dpadRAnt = dpadR;
   dpadLAnt = dpadL;
 
-  delay(10);
+  delay(debugDelay);
 }
 
 // =========================
@@ -618,15 +629,10 @@ void moverConVelocidad(int indice, int eje)
 {
   if(abs(eje) <= DEADZONE) return;
 
-  int paso = map(abs(eje), DEADZONE, 512, 1, 4);
-
-  if(eje > 0)
-    posActual[indice] += paso;
-  else
-    posActual[indice] -= paso;
+  int paso = map(abs(eje), DEADZONE, 512, 1, 2);
 
   posActual[indice] = constrain(
-    posActual[indice],
+    posActual[indice] + (eje > 0 ? paso : -paso),
     canales[indice].limMin,
     canales[indice].limMax
   );
@@ -638,9 +644,7 @@ void loopAnalogico()
   BP32.update();
 
   bool ok = ctrOk();
-  pantalla_analogico(ok);
-
-  if(!ok) return;
+  if(!ok) { actualizarSnap(); return; }
 
   if(chequearHome()) return;
 
@@ -652,10 +656,11 @@ void loopAnalogico()
 
   int lx = myGamepad->axisX();
   int rx = myGamepad->axisRX();
-  int l2 = myGamepad->brake();    // 0-1023
-  int r2 = myGamepad->throttle(); // 0-1023
+  int l2 = myGamepad->brake();
+  int r2 = myGamepad->throttle();
 
-  // Circulo = detener todos los motores
+  bool cambio = false;
+
   if(cir && !cirAnt)
   {
     for(int i = 0; i < NUM_CANALES - 1; i++)
@@ -665,50 +670,49 @@ void loopAnalogico()
         pca.setPWM(canales[i].numeroB, 0, 0);
       pwmActivo[i] = false;
     }
+    cambio = true;
   }
 
   cirAnt = cir;
   l1Ant  = l1;
   r1Ant  = r1;
 
-  // Garra con L2 (cierra) y R2 (abre) — indice 0
+  // Garra L2/R2
   if(l2 > 50)
   {
-    int paso = map(l2, 50, 1023, 1, 4);
-    posActual[0] -= paso;
-    posActual[0] = constrain(posActual[0], canales[0].limMin, canales[0].limMax);
+    posActual[0] = constrain(posActual[0] - map(l2, 50, 1023, 1, 4), canales[0].limMin, canales[0].limMax);
     moverCanalCompleto(0, posActual[0]);
+    cambio = true;
   }
   else if(r2 > 50)
   {
-    int paso = map(r2, 50, 1023, 1, 4);
-    posActual[0] += paso;
-    posActual[0] = constrain(posActual[0], canales[0].limMin, canales[0].limMax);
+    posActual[0] = constrain(posActual[0] + map(r2, 50, 1023, 1, 4), canales[0].limMin, canales[0].limMax);
     moverCanalCompleto(0, posActual[0]);
+    cambio = true;
   }
 
-  // Analogo izquierdo:
-  // L1 mantenido → Rotacion-Brazo (indice 3)
-  // Normal       → Brazo A (indice 1)
-  if(l1)
-    moverConVelocidad(3, lx);
-  else
-    moverConVelocidad(1, lx);
+  // Analogo izq
+  if(abs(lx) > DEADZONE)
+  {
+    if(l1) moverConVelocidad(3, lx);
+    else   moverConVelocidad(1, lx);
+    cambio = true;
+  }
 
-  // Analogo derecho:
-  // R1 mantenido → Rotacion-Robot (indice 4)
-  // Normal       → Brazo B (indice 2)
-  if(r1)
-    moverConVelocidad(4, rx);
-  else
-    moverConVelocidad(2, rx);
+  // Analogo der
+  if(abs(rx) > DEADZONE)
+  {
+    if(r1) moverConVelocidad(4, rx);
+    else   moverConVelocidad(2, rx);
+    cambio = true;
+  }
+
+  if(cambio) actualizarSnap();
 
   delay(20);
 }
 
 // =========================
-
-volatile bool emergenciaFlag = false;
 
 void IRAM_ATTR emergenciaISR()
 {
@@ -726,6 +730,8 @@ void apagarTodosMotores()
   }
 }
 
+// =========================
+
 void setup()
 {
   Serial.begin(115200);
@@ -740,7 +746,6 @@ void setup()
   pca.begin();
   pca.setPWMFreq(50);
 
-  // Verificar si el PCA9685 responde
   I2CPCA.beginTransmission(0x40);
   pcaOk = (I2CPCA.endTransmission() == 0);
 
@@ -751,14 +756,39 @@ void setup()
     &onDisconnectedGamepad
   );
 
-  pantalla_menu(menuSel);
+  // Crear mutex para el OLED
+  mutexOled = xSemaphoreCreateMutex();
+
+  // Inicializar snapshot
+  snapPantalla.modo        = MODO_MENU;
+  snapPantalla.menuSel     = 0;
+  snapPantalla.ctrOk       = false;
+  snapPantalla.posAuto15   = 90;
+  snapPantalla.debugModo   = 0;
+  snapPantalla.debugPos    = 90;
+  snapPantalla.debugSel    = 90;
+  for(int i = 0; i < NUM_CANALES; i++)
+    snapPantalla.posActual[i] = 90;
+
+  // Lanzar tarea de pantalla en Core 0
+  // Core 1 es el que corre loop() por defecto en ESP32
+  xTaskCreatePinnedToCore(
+    tareaPantalla,   // funcion
+    "Pantalla",      // nombre
+    4096,            // stack
+    NULL,            // parametro
+    1,               // prioridad
+    NULL,            // handle
+    0                // core 0
+  );
+
+  pantalla_menu(0);
 }
 
 // =========================
 
 void loop()
 {
-  // Boton BOOT = apagado de emergencia (manejado por interrupcion)
   if(emergenciaFlag)
   {
     emergenciaFlag = false;
@@ -780,4 +810,18 @@ void loop()
   tickAuto15();
 
   verificarTimeoutPWM();
+
+  // Enviar angulos al PC cada 100ms
+  static unsigned long ultimoEnvio = 0;
+  if(millis() - ultimoEnvio >= 100)
+  {
+    ultimoEnvio = millis();
+    Serial.print("ANGULOS:");
+    Serial.print(posActual[0]); Serial.print(",");  // Garra
+    Serial.print(posActual[1]); Serial.print(",");  // Brazo A
+    Serial.print(posActual[2]); Serial.print(",");  // Brazo B
+    Serial.print(posActual[3]); Serial.print(",");  // Rotacion-Brazo
+    Serial.print(posActual[4]); Serial.print(",");  // Rotacion-Robot
+    Serial.println(posAuto15);                      // Canal 15
+  }
 }

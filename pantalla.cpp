@@ -216,7 +216,7 @@ void pantalla_config(int indiceCanal, bool ctrOk)
   oled.display();
 }
 
-void pantalla_debug(int indiceCanal, int pos, int sel, bool ctrOk, bool mostrarNumero)
+void pantalla_debug(int indiceCanal, int pos, int sel, bool ctrOk, bool mostrarNumero, int delayMs)
 {
   oled.clearDisplay();
   oled.setTextColor(SSD1306_WHITE);
@@ -247,6 +247,12 @@ void pantalla_debug(int indiceCanal, int pos, int sel, bool ctrOk, bool mostrarN
   oled.setCursor(0, NAVBAR_H + 34);
   oled.print("SEL:");
   oled.print(sel);
+
+  oled.setTextSize(1);
+  oled.setCursor(0, NAVBAR_H + 52);
+  oled.print("DLY:");
+  oled.print(delayMs);
+  oled.print("ms  L2- R2+");
 
   oled.display();
 }

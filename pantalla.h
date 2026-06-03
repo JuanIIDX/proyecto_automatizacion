@@ -12,6 +12,6 @@ void pantalla_menu(int seleccion);
 void pantalla_control(int indiceCanal, int posActual, int selManual, bool ctrOk);
 void pantalla_auto15(int pos, bool ctrOk);
 void pantalla_config(int indiceCanal, bool ctrOk);
-void pantalla_debug(int indiceCanal, int pos, int sel, bool ctrOk, bool mostrarNumero);
+void pantalla_debug(int indiceCanal, int pos, int sel, bool ctrOk, bool mostrarNumero, int delayMs = 20);
 void pantalla_debug_auto(int pos, bool ctrOk);
 void pantalla_analogico(bool ctrOk);

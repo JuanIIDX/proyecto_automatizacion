@@ -1,7 +1,7 @@
 #include "servos.h"
 
 Canal canales[NUM_CANALES] = {
-  {  0, -1, false, "Garra",          90, 91  },
+  {  0, -1, false, "Garra",          30, 110 },
   {  3, -1, false, "Brazo A",        10, 160 },
   {  4, -1, false, "Brazo B",        10, 160 },
   {  8,  9, true,  "Rotacion-Brazo", 10, 160 },
