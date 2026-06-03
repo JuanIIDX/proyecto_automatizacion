@@ -1,0 +1,116 @@
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <Adafruit_PWMServoDriver.h>
+
+// OLED
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+
+Adafruit_SSD1306 oled(
+  SCREEN_WIDTH,
+  SCREEN_HEIGHT,
+  &Wire,
+  -1
+);
+
+// PCA9685
+TwoWire I2CPCA = TwoWire(1);
+
+Adafruit_PWMServoDriver pca(
+  0x40,
+  I2CPCA
+);
+
+// SG90 estandar: 1ms=0° 1.5ms=90° 2ms=180° a 50Hz
+// 4096 ticks / 20ms = 204.8 ticks/ms
+#define SERVOMIN 100   // 0°
+#define SERVOMID 350   // 90°
+#define SERVOMAX 600   // 180°
+
+#define CANAL 0
+
+int posActual = 90;
+int posFinal  = 90;
+
+// =========================
+
+int angleToPulse(int angulo)
+{
+  return map(
+    angulo,
+    0,
+    180,
+    SERVOMIN,
+    SERVOMAX
+  );
+}
+
+void moverServo(int angulo)
+{
+  pca.setPWM(
+    CANAL,
+    0,
+    angleToPulse(angulo)
+  );
+}
+
+void actualizarPantalla()
+{
+  oled.clearDisplay();
+  oled.setTextColor(SSD1306_WHITE);
+
+  oled.setTextSize(2);
+  oled.setCursor(0, 0);
+  oled.print("POS:");
+  oled.print(posActual);
+
+  oled.setCursor(0, 35);
+  oled.print("OBJ:");
+  oled.print(posFinal);
+
+  oled.display();
+}
+
+// =========================
+
+void setup()
+{
+  Wire.begin(21, 22);
+
+  oled.begin(SSD1306_SWITCHCAPVCC, 0x3C);
+
+  I2CPCA.begin(26, 25);
+  pca.begin();
+  pca.setPWMFreq(50);
+
+  // Arrancar en 90° sin enviar señal
+  pca.setPWM(CANAL, 0, 0);
+
+  actualizarPantalla();
+}
+
+// =========================
+
+void loop()
+{
+  // Mover de 0 a 180 muy lento
+  for(posFinal = 0; posFinal <= 180; posFinal++)
+  {
+    posActual = posFinal;
+    moverServo(posActual);
+    actualizarPantalla();
+    delay(30);
+  }
+
+  // Volver a 90 muy lento
+  for(posFinal = 180; posFinal >= 90; posFinal--)
+  {
+    posActual = posFinal;
+    moverServo(posActual);
+    actualizarPantalla();
+    delay(30);
+  }
+
+  delay(1000);
+}
