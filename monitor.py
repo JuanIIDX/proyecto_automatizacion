@@ -27,8 +27,12 @@ LIMITES = [
 
 NOMBRES_IR = ["IR-1 (GPIO32)", "IR-2 (GPIO33)", "IR-3 (GPIO34)", "IR-4 (GPIO35)"]
 
+# Colores por sensor IR (mismo mapeo que juego.py)
+# IR1=Verde, IR2=Amarillo, IR3=Rojo, IR4=Azul
+COLORES_IR = ["#46dc64", "#ffdc32", "#ff4646", "#4682ff"]
+
 COLOR_BARRA    = "#00ff99"
-COLOR_BARRA_IR = "#ff9900"
+COLOR_BARRA_IR = "#ff9900"  # fallback
 COLOR_FONDO    = "#1a1a2e"
 COLOR_PANEL    = "#16213e"
 COLOR_PANEL_IR = "#1e1a0e"
@@ -133,24 +137,25 @@ class Monitor:
         # ── Seccion sensores IR ──
         tk.Label(self.root, text="SENSORES IR (crudo 0–4095)",
                  font=("Consolas", 11, "bold"),
-                 bg=COLOR_FONDO, fg="#ff9900").pack(anchor="w", padx=20, pady=(10, 2))
+                 bg=COLOR_FONDO, fg=COLOR_TITULO).pack(anchor="w", padx=20, pady=(10, 2))
 
         self.barras_ir  = []
         self.lbl_val_ir = []
 
         for i, nombre in enumerate(NOMBRES_IR):
+            c = COLORES_IR[i]
             frame = tk.Frame(self.root, bg=COLOR_PANEL_IR, padx=12, pady=6)
             frame.pack(fill="x", padx=20, pady=2)
 
             tk.Label(frame, text=nombre, font=("Consolas", 10, "bold"),
-                     bg=COLOR_PANEL_IR, fg="#ff9900",
+                     bg=COLOR_PANEL_IR, fg=c,
                      width=18, anchor="w").grid(row=0, column=0, sticky="w")
 
             canvas = tk.Canvas(frame, width=300, height=16,
                                 bg="#0d0d1a", highlightthickness=0)
             canvas.grid(row=0, column=1, padx=(8, 8))
             canvas.create_rectangle(0, 0, 300, 16, fill="#0d0d1a", outline="")
-            barra_id = canvas.create_rectangle(0, 0, 0, 16, fill=COLOR_BARRA_IR, outline="")
+            barra_id = canvas.create_rectangle(0, 0, 0, 16, fill=c, outline="")
             self.barras_ir.append((canvas, barra_id))
 
             lv = tk.Label(frame, text="   0", font=("Consolas", 11, "bold"),

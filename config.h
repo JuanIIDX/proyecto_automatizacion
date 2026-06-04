@@ -19,8 +19,9 @@
 #define MODO_DEBUG     5
 #define MODO_HOMING    6
 
-// Intervalo entre pasos del homing (ms) — mas alto = mas lento
-#define HOMING_INTERVALO 18
+// Intervalo entre pasos del homing (ms) por canal
+#define HOMING_INTERVALO_NORMAL  18   // Brazo A y B
+#define HOMING_INTERVALO_LENTO   40   // Rotacion Robot (carga pesada)
 
 // Opciones del menu (lista horizontal, se desplaza con dpad izq/der)
 #define MENU_CONTROL   0

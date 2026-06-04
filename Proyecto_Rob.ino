@@ -4,6 +4,7 @@
 #include <Adafruit_SSD1306.h>
 #include <Adafruit_PWMServoDriver.h>
 #include <Bluepad32.h>
+#include <TM1637Display.h>
 
 #include "config.h"
 #include "servos.h"
@@ -13,6 +14,252 @@
 Adafruit_SSD1306        oled(128, 64, &Wire, -1);
 TwoWire                 I2CPCA = TwoWire(1);
 Adafruit_PWMServoDriver pca(0x40, I2CPCA);
+TM1637Display           tm(18, 19);   // CLK=18, DIO=19
+
+// =========================
+// RELOJ TM1637
+// =========================
+
+#define RELOJ_NORMAL   0
+#define RELOJ_EDIT     1
+#define RELOJ_FELIZ    2
+#define RELOJ_PAUSA    3
+
+int           relojModo       = RELOJ_NORMAL;
+bool          relojCorriendo  = false;
+unsigned long relojInicio     = 0;
+unsigned long relojPausadoMs  = 0;   // ms acumulados antes de pausa
+
+// ── Segmentos custom ──────────────────────────────────────────
+// TM1637 segmentos: A=bit0 B=bit1 C=bit2 D=bit3 E=bit4 F=bit5 G=bit6
+//
+//  _A_
+// F   B
+//  _G_
+// E   C
+//  _D_
+//
+// Guion: G                     = 0b01000000
+// Cero:  A+B+C+D+E+F           = 0b00111111
+// "n" feliz (U invertida baja): C+D+E = 0b00011100
+//   se ve como arco hacia abajo en la mitad inferior del digit
+
+static const uint8_t SEG_GUION = 0b01000000;  // -
+static const uint8_t SEG_CERO  = 0b00111111;  // 0
+static const uint8_t SEG_OJO_F = 0b00011100;  // n (arco feliz)
+
+// Estado animacion edicion
+unsigned long animEditUltimo = 0;
+bool          animEditFase   = false;
+
+// Estado animacion feliz
+// Fase 0-5: parpadeo del tiempo (3 veces encendido/apagado)
+// Fase 6+:  ojitos fijos
+int           felizFase      = 0;
+unsigned long felizUltimo    = 0;
+// Guarda el tiempo final para mostrarlo durante el parpadeo
+uint8_t       felizSegs[4]  = {0,0,0,0};
+
+void relojIniciaNivel()
+{
+  relojModo      = RELOJ_NORMAL;
+  relojCorriendo = true;
+  relojInicio    = millis();
+  relojPausadoMs = 0;
+}
+
+void relojFin()
+{
+  // Acumular el tiempo transcurrido antes de parar
+  if(relojCorriendo)
+    relojPausadoMs += millis() - relojInicio;
+  relojCorriendo = false;
+  relojModo      = RELOJ_FELIZ;
+  felizFase      = 0;
+  felizUltimo    = millis();
+  // Guardar los segmentos del tiempo actual para el parpadeo
+  unsigned long ms_total  = relojPausadoMs;
+  unsigned long seg_total = ms_total / 1000;
+  unsigned long ms_resto  = ms_total % 1000;
+  int d0, d1, d2, d3;
+  if(seg_total < 100)
+  {
+    d0 = (int)seg_total / 10; d1 = (int)seg_total % 10;
+    d2 = (int)(ms_resto / 10) / 10; d3 = (int)(ms_resto / 10) % 10;
+  }
+  else
+  {
+    int mm = (int)min((unsigned long)99, seg_total / 60);
+    int ss = (int)(seg_total % 60);
+    d0 = mm/10; d1 = mm%10; d2 = ss/10; d3 = ss%10;
+  }
+  felizSegs[0] = tm.encodeDigit(d0);
+  felizSegs[1] = tm.encodeDigit(d1) | 0x80;  // con puntos
+  felizSegs[2] = tm.encodeDigit(d2);
+  felizSegs[3] = tm.encodeDigit(d3);
+}
+
+void relojModoEdicion()
+{
+  relojCorriendo = false;
+  relojModo      = RELOJ_EDIT;
+  animEditFase   = false;
+  animEditUltimo = 0;
+}
+
+void relojModoPausa()
+{
+  if(relojCorriendo)
+    relojPausadoMs += millis() - relojInicio;
+  relojCorriendo = false;
+  relojModo      = RELOJ_PAUSA;
+  animEditFase   = false;
+  animEditUltimo = 0;
+}
+
+void tickReloj()
+{
+  // ── FELIZ ────────────────────────────────────────────────────
+  if(relojModo == RELOJ_FELIZ)
+  {
+    unsigned long ahora = millis();
+    if(felizFase < 6)
+    {
+      // Parpadea 3 veces: encendido 400ms / apagado 300ms
+      unsigned long intervalo = (felizFase % 2 == 0) ? 400 : 300;
+      if(ahora - felizUltimo >= intervalo)
+      {
+        felizUltimo = ahora;
+        felizFase++;
+      }
+      // Par = encendido, impar = apagado
+      if(felizFase % 2 == 0)
+        tm.setSegments(felizSegs);
+      else
+      {
+        uint8_t apagado[4] = {0,0,0,0};
+        tm.setSegments(apagado);
+      }
+    }
+    else
+    {
+      // Ojitos felices: n _ _ n  (sin puntos centrales)
+      uint8_t segs[4] = { SEG_OJO_F, 0, 0, SEG_OJO_F };
+      tm.setSegments(segs);
+    }
+    return;
+  }
+
+  // ── PAUSA ────────────────────────────────────────────────────
+  if(relojModo == RELOJ_PAUSA)
+  {
+    unsigned long ahora = millis();
+    if(ahora - animEditUltimo >= 600)
+    {
+      animEditUltimo = ahora;
+      animEditFase   = !animEditFase;
+    }
+    uint8_t segs[4];
+    // Alterna 0 _ _ 0  /  - _ _ -  (sin puntos)
+    uint8_t izq = animEditFase ? SEG_CERO : SEG_GUION;
+    segs[0] = izq; segs[1] = 0; segs[2] = 0; segs[3] = izq;
+    tm.setSegments(segs);
+    return;
+  }
+
+  // ── EDICION ──────────────────────────────────────────────────
+  if(relojModo == RELOJ_EDIT)
+  {
+    unsigned long ahora = millis();
+    if(ahora - animEditUltimo >= 600)
+    {
+      animEditUltimo = ahora;
+      animEditFase   = !animEditFase;
+    }
+    uint8_t segs[4];
+    if(animEditFase)
+    {
+      // 0 _ _ 0  (ojos abiertos en extremos, sin puntos)
+      segs[0] = SEG_CERO;
+      segs[1] = 0;
+      segs[2] = 0;
+      segs[3] = SEG_CERO;
+    }
+    else
+    {
+      // - _ _ -  (guion en extremos)
+      segs[0] = SEG_GUION;
+      segs[1] = 0;
+      segs[2] = 0;
+      segs[3] = SEG_GUION;
+    }
+    tm.setSegments(segs);
+    return;
+  }
+
+  // Modo normal: temporizador
+  unsigned long ms_total;
+  if(relojCorriendo)
+    ms_total = millis() - relojInicio + relojPausadoMs;
+  else
+    ms_total = relojPausadoMs;
+
+  unsigned long seg_total = ms_total / 1000;
+  unsigned long ms_resto  = ms_total % 1000;
+
+  int d0, d1, d2, d3;
+
+  if(seg_total < 100)
+  {
+    // SS:dd  (segundos : decimas*10, 00-99)
+    int ss = (int)seg_total;
+    int dd = (int)(ms_resto / 10);  // 0-99
+    d0 = ss / 10;
+    d1 = ss % 10;
+    d2 = dd / 10;
+    d3 = dd % 10;
+  }
+  else
+  {
+    // MM:SS
+    int mm = (int)min((unsigned long)99, seg_total / 60);
+    int ss = (int)(seg_total % 60);
+    d0 = mm / 10;
+    d1 = mm % 10;
+    d2 = ss / 10;
+    d3 = ss % 10;
+  }
+
+  uint8_t segs[4];
+  segs[0] = tm.encodeDigit(d0);
+  segs[1] = tm.encodeDigit(d1);
+  segs[2] = tm.encodeDigit(d2);
+  segs[3] = tm.encodeDigit(d3);
+  // Encender los dos puntos centrales (bit 7 del segmento 1)
+  segs[1] |= 0x80;
+  tm.setSegments(segs);
+}
+
+// =========================
+// PARSER DE COMANDOS SERIAL
+// =========================
+void procesarComandoSerial(const String& linea)
+{
+  if(!linea.startsWith("CMD:")) return;
+  String cmd = linea.substring(4);
+  cmd.trim();
+
+  if(cmd == "NIVEL_START")         relojIniciaNivel();
+  else if(cmd == "NIVEL_START_RESUME") {
+    // Reanudar sin resetear relojPausadoMs
+    relojModo      = RELOJ_NORMAL;
+    relojCorriendo = true;
+    relojInicio    = millis();
+  }
+  else if(cmd == "NIVEL_END")      relojFin();
+  else if(cmd == "EDIT")           relojModoEdicion();
+  else if(cmd == "PAUSA")          relojModoPausa();
+}
 
 // Gamepad
 GamepadPtr myGamepad;
@@ -83,22 +330,33 @@ void solicitarPantalla()
 // Tarea del Core 0 — solo dibuja la pantalla
 void tareaPantalla(void* param)
 {
+  unsigned long ultimoRefreshForzado = 0;
+
   for(;;)
   {
+    // Forzar redibujado cada 500ms aunque no haya cambios (watchdog pantalla)
+    unsigned long ahora = (unsigned long)(esp_timer_get_time() / 1000);
+    if(!pantallaActualizar && (ahora - ultimoRefreshForzado > 500))
+    {
+      pantallaActualizar = true;
+      ultimoRefreshForzado = ahora;
+    }
+
     if(pantallaActualizar)
     {
       pantallaActualizar = false;
+      ultimoRefreshForzado = ahora;
 
       // Tomar snapshot bajo mutex
       EstadoPantalla s;
-      if(xSemaphoreTake(mutexOled, pdMS_TO_TICKS(10)))
+      if(xSemaphoreTake(mutexOled, pdMS_TO_TICKS(20)))
       {
         s = snapPantalla;
         xSemaphoreGive(mutexOled);
       }
       else
       {
-        vTaskDelay(1);
+        vTaskDelay(2);
         continue;
       }
 
@@ -637,11 +895,11 @@ void loopDebug()
 // =========================
 
 // Secuencia: { indice_canal, target }
-struct HomingPaso { int indice; int target; const char* nombre; };
+struct HomingPaso { int indice; int target; const char* nombre; unsigned long intervalo; };
 static const HomingPaso HOMING_SEQ[] = {
-  { 4, 180, "Rotacion Robot" },
-  { 2, 100, "Brazo B"        },
-  { 1,  90, "Brazo A"        },
+  { 4, 180, "Rotacion Robot", HOMING_INTERVALO_LENTO  },
+  { 2, 100, "Brazo B",        HOMING_INTERVALO_NORMAL },
+  { 1,  90, "Brazo A",        HOMING_INTERVALO_NORMAL },
 };
 static const int HOMING_TOTAL = 3;
 
@@ -698,7 +956,7 @@ bool tickHoming()
     return true;
 
   unsigned long ahora = millis();
-  if(ahora - homingUltimo < HOMING_INTERVALO)
+  if(ahora - homingUltimo < HOMING_SEQ[homingPasoActual].intervalo)
     return false;
   homingUltimo = ahora;
 
@@ -760,9 +1018,10 @@ void loopHoming()
 // CONTROL ANALOGICO
 // =========================
 
-// true = izq controla BrazoA y der controla BrazoB
-// false = izq controla BrazoB y der controla BrazoA (swap con Share)
-bool analogoSwap = false;
+// Swap de analogicos (Share): false=izq→B/der→A, true=izq→A/der→B
+bool analogoSwap    = false;
+// Modo eje Brazo A: false=vertical(Y), true=horizontal(X) — Start para alternar
+bool brazoAEjeX     = false;
 
 void moverConVelocidad(int indice, int eje)
 {
@@ -797,21 +1056,34 @@ void loopAnalogico()
   bool l1    = (botones & 0x0010);
   bool r1    = (botones & 0x0020);
   bool share = (misc    & 0x0002);
+  bool start = (misc    & 0x0004);   // Start / Options
 
-  int lx = myGamepad->axisX();
-  int rx = myGamepad->axisRX();
+  // Ejes de los dos analogicos
+  int lx = myGamepad->axisX();   // izquierdo horizontal
+  int ly = myGamepad->axisY();   // izquierdo vertical
+  int rx = myGamepad->axisRX();  // derecho horizontal
+  int ry = myGamepad->axisRY();  // derecho vertical
   int l2 = myGamepad->brake();
   int r2 = myGamepad->throttle();
 
   bool cambio = false;
 
-  // Share = intercambiar analogos Brazo A / Brazo B
+  // Share = intercambiar cual analogico controla A y cual controla B
   if(share && !cirAnt)
   {
     analogoSwap = !analogoSwap;
     cambio = true;
   }
   cirAnt = share;
+
+  // Start = alternar eje del Brazo A entre vertical(Y) y horizontal(X)
+  static bool startAnt = false;
+  if(start && !startAnt)
+  {
+    brazoAEjeX = !brazoAEjeX;
+    cambio = true;
+  }
+  startAnt = start;
 
   // Garra L2/R2 (indice 0)
   if(l2 > 50)
@@ -827,36 +1099,42 @@ void loopAnalogico()
     cambio = true;
   }
 
-  // Analogo izquierdo → BrazoB(2) o BrazoA(1) segun swap
-  int indiceLx = analogoSwap ? 1 : 2;
-  if(abs(lx) > DEADZONE)
+  // Brazo A (indice 1): siempre eje Y — arriba/abajo
+  // Brazo B (indice 2): siempre eje X — izquierda/derecha
+  // Sin swap: analogo izquierdo → BrazoB(lx), analogo derecho → BrazoA(ry)
+  // Con swap: analogo izquierdo → BrazoA(ly), analogo derecho → BrazoB(rx)
+  // Analogo asignado a A: izquierdo si swap, derecho si no
+  // Eje de A: Y invertido por defecto, X si brazoAEjeX
+  // Analogo asignado a B: derecho si swap, izquierdo si no — siempre eje X
+  int ejeA_raw, ejeB;
+  if(analogoSwap) { ejeA_raw = brazoAEjeX ? lx : -ly;  ejeB = rx; }
+  else            { ejeA_raw = brazoAEjeX ? rx : -ry;  ejeB = lx; }
+
+  if(abs(ejeA_raw) > DEADZONE)
   {
-    moverConVelocidad(indiceLx, lx);
+    moverConVelocidad(1, ejeA_raw);  // BrazoA
     cambio = true;
   }
-
-  // Analogo derecho → BrazoA(1) o BrazoB(2) segun swap
-  int indiceRx = analogoSwap ? 2 : 1;
-  if(abs(rx) > DEADZONE)
+  if(abs(ejeB) > DEADZONE)
   {
-    moverConVelocidad(indiceRx, rx);
+    moverConVelocidad(2, ejeB);  // BrazoB
     cambio = true;
   }
 
   // L1/R1 = Rotacion-Robot (indice 4)
   static unsigned long ultimoRotRobot = 0;
-  if(millis() - ultimoRotRobot >= 40)
+  if(millis() - ultimoRotRobot >= 28)
   {
     if(l1)
     {
-      posActual[4] = constrain(posActual[4] - 4, canales[4].limMin, canales[4].limMax);
+      posActual[4] = constrain(posActual[4] - 1, canales[4].limMin, canales[4].limMax);
       moverCanalCompleto(4, posActual[4]);
       ultimoRotRobot = millis();
       cambio = true;
     }
     else if(r1)
     {
-      posActual[4] = constrain(posActual[4] + 4, canales[4].limMin, canales[4].limMax);
+      posActual[4] = constrain(posActual[4] + 1, canales[4].limMin, canales[4].limMax);
       moverCanalCompleto(4, posActual[4]);
       ultimoRotRobot = millis();
       cambio = true;
@@ -895,6 +1173,10 @@ void setup()
 
   Wire.begin(4, 5);
   pantalla_init();
+
+  tm.setBrightness(5);
+  tm.clear();
+  relojIniciaNivel();  // arranca en 00:00 desde el boot
 
   I2CPCA.begin(16, 17);
   pca.begin();
@@ -943,6 +1225,34 @@ void setup()
 
 void loop()
 {
+  // Leer comandos del PC — no bloqueante, caracter a caracter
+  static String bufSerial = "";
+  while(Serial.available())
+  {
+    char c = (char)Serial.read();
+    if(c == '\n')
+    {
+      bufSerial.trim();
+      if(bufSerial.length() > 0)
+        procesarComandoSerial(bufSerial);
+      bufSerial = "";
+    }
+    else if(c != '\r')
+    {
+      bufSerial += c;
+      if(bufSerial.length() > 64)  // evitar desbordamiento
+        bufSerial = "";
+    }
+  }
+
+  // Tick del reloj TM1637 — cada 100ms es suficiente
+  static unsigned long ultimoTickReloj = 0;
+  if(millis() - ultimoTickReloj >= 100)
+  {
+    ultimoTickReloj = millis();
+    tickReloj();
+  }
+
   if(emergenciaFlag)
   {
     emergenciaFlag = false;
@@ -981,11 +1291,17 @@ void loop()
     Serial.print(posActual[4]); Serial.print(",");
     Serial.println(posAuto15);
 
-    // Sensores IR (GPIO 32, 33, 34, 35)
+    // Sensores IR — orden remapeado segun posicion fisica:
+    // IR1=Verde(GPIO33), IR2=Amarillo(GPIO32), IR3=Rojo(GPIO35), IR4=Azul(GPIO34)
     Serial.print("IR:");
-    Serial.print(analogRead(32)); Serial.print(",");
     Serial.print(analogRead(33)); Serial.print(",");
-    Serial.print(analogRead(34)); Serial.print(",");
-    Serial.println(analogRead(35));
+    Serial.print(analogRead(32)); Serial.print(",");
+    Serial.print(analogRead(35)); Serial.print(",");
+    Serial.println(analogRead(34));
+
+    // Temperatura interna del ESP32
+    float tempC = temperatureRead();
+    Serial.print("TEMP:");
+    Serial.println(tempC, 1);
   }
 }

@@ -41,6 +41,10 @@ void moverCanalCompleto(int indice, int angulo)
     pca.setPWM(canales[indice].numeroB, 0, angleToPulse(anguloB));
   }
 
+  // Canal 7 = Rotacion-Reloj: espejo invertido de Rotacion-Robot (indice 4)
+  if(indice == 4)
+    pca.setPWM(7, 0, angleToPulse(180 - angulo));
+
   ultimoMovimiento[indice] = millis();
   pwmActivo[indice] = true;
 }
@@ -90,4 +94,6 @@ void servos_init()
     if(canales[i].numeroB != -1)
       pca.setPWM(canales[i].numeroB, 0, 0);
   }
+  // Canal 7 Rotacion-Reloj: espejo de Rotacion-Robot (arranca en 180-180=0)
+  pca.setPWM(7, 0, angleToPulse(180 - canales[4].limMax));
 }

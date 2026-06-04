@@ -83,6 +83,17 @@ void navbar(bool ctrConectado)
   // Cuadro PCA izquierda
   dibujarIconoPCA(1, 1, pcaOk);
 
+  // Temperatura en el centro
+  float tempC = temperatureRead();
+  char buf[8];
+  snprintf(buf, sizeof(buf), "%d\xDF" "C", (int)tempC);  // \xDF = simbolo grado en SSD1306
+  oled.setTextSize(1);
+  oled.setTextColor(SSD1306_WHITE);
+  // Centrar: cada caracter mide 6px, buf tiene ~5 chars
+  int tx = (128 - (int)strlen(buf) * 6) / 2;
+  oled.setCursor(tx, 3);
+  oled.print(buf);
+
   // Icono control derecha
   dibujarIconoControl(119, 2, ctrConectado);
 }
@@ -399,7 +410,7 @@ void pantalla_analogico(bool ctrOk)
   oled.print(posActual[4]);
 
   oled.setCursor(0, NAVBAR_H + 28);
-  oled.print("LX=BrzA  RX=BrzB");
+  oled.print("LY=BrzA  LX=BrzB");
   oled.setCursor(0, NAVBAR_H + 38);
   oled.print("[]/O=RBrz L2/R2=RRob");
 
