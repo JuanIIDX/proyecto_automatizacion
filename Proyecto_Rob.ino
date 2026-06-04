@@ -319,96 +319,81 @@ struct EstadoPantalla
   int  homingTotal;
 };
 
-volatile bool pantallaActualizar = false;
 EstadoPantalla snapPantalla;
 
-void solicitarPantalla()
-{
-  pantallaActualizar = true;
-}
-
-// Tarea del Core 0 — solo dibuja la pantalla
+// Tarea del Core 0 — dibuja la pantalla en loop continuo
+// NO usa flags ni mutex para el dibujo — solo lee el snapshot
+// El snapshot se escribe atomicamente desde Core 1
 void tareaPantalla(void* param)
 {
-  unsigned long ultimoRefreshForzado = 0;
+  // Dar tiempo a Core 1 para terminar setup() completamente
+  vTaskDelay(pdMS_TO_TICKS(2000));
 
   for(;;)
   {
-    // Forzar redibujado cada 500ms aunque no haya cambios (watchdog pantalla)
-    unsigned long ahora = (unsigned long)(esp_timer_get_time() / 1000);
-    if(!pantallaActualizar && (ahora - ultimoRefreshForzado > 500))
+    // Copiar snapshot bajo mutex (operacion rapida, solo copia de struct)
+    EstadoPantalla s;
+    if(xSemaphoreTake(mutexOled, pdMS_TO_TICKS(5)) == pdTRUE)
     {
-      pantallaActualizar = true;
-      ultimoRefreshForzado = ahora;
+      s = snapPantalla;
+      xSemaphoreGive(mutexOled);
+    }
+    else
+    {
+      vTaskDelay(pdMS_TO_TICKS(10));
+      continue;
     }
 
-    if(pantallaActualizar)
+    // Dibujar segun modo
+    switch(s.modo)
     {
-      pantallaActualizar = false;
-      ultimoRefreshForzado = ahora;
-
-      // Tomar snapshot bajo mutex
-      EstadoPantalla s;
-      if(xSemaphoreTake(mutexOled, pdMS_TO_TICKS(20)))
-      {
-        s = snapPantalla;
-        xSemaphoreGive(mutexOled);
-      }
-      else
-      {
-        vTaskDelay(2);
-        continue;
-      }
-
-      // Dibujar segun modo
-      switch(s.modo)
-      {
-        case MODO_MENU:
-          pantalla_menu(s.menuSel);
-          break;
-        case MODO_CONTROL:
-          pantalla_control(
-            s.indiceCanal,
-            s.posActual[s.indiceCanal],
-            selManual[s.indiceCanal],
-            s.ctrOk
+      case MODO_MENU:
+        pantalla_menu(s.menuSel);
+        break;
+      case MODO_CONTROL:
+        pantalla_control(
+          s.indiceCanal,
+          s.posActual[s.indiceCanal],
+          selManual[s.indiceCanal],
+          s.ctrOk
+        );
+        break;
+      case MODO_AUTO15:
+        pantalla_auto15(s.posAuto15, s.ctrOk);
+        break;
+      case MODO_ANALOGICO:
+        pantalla_analogico(s.ctrOk);
+        break;
+      case MODO_CONFIG:
+        pantalla_config(s.indiceCanal, s.ctrOk);
+        break;
+      case MODO_DEBUG:
+        if(s.debugModo == 1)
+          pantalla_debug_auto(s.debugPos, s.ctrOk);
+        else
+          pantalla_debug(
+            s.debugIdxPantalla,
+            s.debugPos,
+            s.debugSel,
+            s.ctrOk,
+            s.debugMostrarNumero,
+            s.debugDelay
           );
-          break;
-        case MODO_AUTO15:
-          pantalla_auto15(s.posAuto15, s.ctrOk);
-          break;
-        case MODO_ANALOGICO:
-          pantalla_analogico(s.ctrOk);
-          break;
-        case MODO_CONFIG:
-          pantalla_config(s.indiceCanal, s.ctrOk);
-          break;
-        case MODO_DEBUG:
-          if(s.debugModo == 1)
-            pantalla_debug_auto(s.debugPos, s.ctrOk);
-          else
-            pantalla_debug(
-              s.debugIdxPantalla,
-              s.debugPos,
-              s.debugSel,
-              s.ctrOk,
-              s.debugMostrarNumero,
-              s.debugDelay
-            );
-          break;
-        case MODO_HOMING:
-          pantalla_homing(
-            s.homingNombre,
-            s.homingPos,
-            s.homingTarget,
-            s.homingPaso,
-            s.homingTotal,
-            s.ctrOk
-          );
-          break;
-      }
+        break;
+      case MODO_HOMING:
+        pantalla_homing(
+          s.homingNombre,
+          s.homingPos,
+          s.homingTarget,
+          s.homingPaso,
+          s.homingTotal,
+          s.ctrOk
+        );
+        break;
     }
-    vTaskDelay(1);  // ceder tiempo al sistema
+
+    // ~15 FPS para la pantalla — suficiente y sin sobrecargar I2C
+    vTaskDelay(pdMS_TO_TICKS(66));
   }
 }
 
@@ -426,8 +411,8 @@ void actualizarSnap()
       snapPantalla.posActual[i] = posActual[i];
     xSemaphoreGive(mutexOled);
   }
-  solicitarPantalla();
 }
+
 
 // =========================
 
@@ -720,8 +705,8 @@ void actualizarSnapDebug()
     snapPantalla.debugDelay         = debugDelay;
     xSemaphoreGive(mutexOled);
   }
-  solicitarPantalla();
 }
+
 
 void loopDebug()
 {
@@ -946,8 +931,8 @@ void actualizarSnapHoming(const char* nombre, int pos, int target, int paso, int
     snapPantalla.homingTotal  = total;
     xSemaphoreGive(mutexOled);
   }
-  solicitarPantalla();
 }
+
 
 // Devuelve true cuando termino toda la secuencia
 bool tickHoming()
@@ -1171,28 +1156,61 @@ void setup()
   attachInterrupt(digitalPinToInterrupt(0), emergenciaISR, FALLING);
   delay(1000);
 
+  // Crear mutex ANTES de lanzar la tarea
+  mutexOled = xSemaphoreCreateMutex();
+
+  // Inicializar todo el hardware primero
   Wire.begin(4, 5);
+
+  // Escanear I2C bus 0 (OLED)
+  Serial.println("=== SCAN I2C BUS 0 (SDA=4 SCL=5) ===");
+  for(uint8_t addr = 1; addr < 127; addr++)
+  {
+    Wire.beginTransmission(addr);
+    uint8_t err = Wire.endTransmission();
+    if(err == 0)
+    {
+      Serial.print("  Encontrado en 0x");
+      if(addr < 16) Serial.print("0");
+      Serial.println(addr, HEX);
+    }
+  }
+  Serial.println("=== FIN SCAN BUS 0 ===");
+
   pantalla_init();
+  Serial.println("pantalla_init() completado");
 
   tm.setBrightness(5);
   tm.clear();
-  relojIniciaNivel();  // arranca en 00:00 desde el boot
+  relojIniciaNivel();
 
   I2CPCA.begin(16, 17);
+
+  // Escanear I2C bus 1 (PCA9685)
+  Serial.println("=== SCAN I2C BUS 1 (SDA=16 SCL=17) ===");
+  for(uint8_t addr = 1; addr < 127; addr++)
+  {
+    I2CPCA.beginTransmission(addr);
+    uint8_t err = I2CPCA.endTransmission();
+    if(err == 0)
+    {
+      Serial.print("  Encontrado en 0x");
+      if(addr < 16) Serial.print("0");
+      Serial.println(addr, HEX);
+    }
+  }
+  Serial.println("=== FIN SCAN BUS 1 ===");
+
   pca.begin();
   pca.setPWMFreq(50);
 
   I2CPCA.beginTransmission(0x40);
   pcaOk = (I2CPCA.endTransmission() == 0);
+  Serial.print("PCA9685 ok: "); Serial.println(pcaOk);
 
   servos_init();
 
-  BP32.setup(
-    &onConnectedGamepad,
-    &onDisconnectedGamepad
-  );
-
-  // Crear mutex para el OLED
+  // Crear mutex
   mutexOled = xSemaphoreCreateMutex();
 
   // Inicializar snapshot
@@ -1206,19 +1224,25 @@ void setup()
   for(int i = 0; i < NUM_CANALES; i++)
     snapPantalla.posActual[i] = 90;
 
-  // Lanzar tarea de pantalla en Core 0
-  // Core 1 es el que corre loop() por defecto en ESP32
-  xTaskCreatePinnedToCore(
-    tareaPantalla,   // funcion
-    "Pantalla",      // nombre
-    4096,            // stack
-    NULL,            // parametro
-    1,               // prioridad
-    NULL,            // handle
-    0                // core 0
+  BP32.setup(
+    &onConnectedGamepad,
+    &onDisconnectedGamepad
   );
 
-  pantalla_menu(0);
+  // Snapshot inicial
+  actualizarSnap();
+
+  // Lanzar tarea de pantalla en Core 0
+  // Todo el hardware ya esta inicializado — la tarea espera 2s de seguridad
+  xTaskCreatePinnedToCore(
+    tareaPantalla,
+    "Pantalla",
+    4096,
+    NULL,
+    1,
+    NULL,
+    0
+  );
 }
 
 // =========================

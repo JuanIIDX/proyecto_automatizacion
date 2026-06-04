@@ -311,6 +311,107 @@ class Jugador:
 
 
 # ─────────────────────────────────────────────
+# GAMEPAD USB (pygame.joystick)
+# Soporta PS4, PS5, Xbox — mapeo por nombre
+# ─────────────────────────────────────────────
+class GamepadUSB:
+    """
+    Abstraccion de control USB. Lee ejes y botones de pygame.joystick
+    y los expone con la misma interfaz que se usa en el juego:
+      izq, der, salto, pausa
+    Mapeo:
+      Eje 0 = stick izq horizontal
+      Eje 1 = stick izq vertical
+      Boton 0 = X/A (salto)
+      Boton 1 = Circulo/B
+      Boton 8/9 = Select/Start o Share/Options (pausa)
+      Dpad: hat(0) para algunos, botones para otros
+    """
+    DEADZONE = 0.3
+
+    def __init__(self):
+        pygame.joystick.init()
+        self.joy     = None
+        self.nombre  = "Sin control USB"
+        self._prev_pausa = False
+        self._prev_r     = False
+        self._actualizar()
+
+    def _actualizar(self):
+        pygame.joystick.quit()
+        pygame.joystick.init()
+        n = pygame.joystick.get_count()
+        if n > 0:
+            self.joy = pygame.joystick.Joystick(0)
+            self.joy.init()
+            self.nombre = self.joy.get_name()
+        else:
+            self.joy    = None
+            self.nombre = "Sin control USB"
+
+    def reconectar(self):
+        self._actualizar()
+
+    def conectado(self):
+        return self.joy is not None
+
+    def _eje(self, idx):
+        try:
+            v = self.joy.get_axis(idx)
+            return v if abs(v) > self.DEADZONE else 0.0
+        except Exception:
+            return 0.0
+
+    def _btn(self, idx):
+        try:
+            return self.joy.get_button(idx)
+        except Exception:
+            return 0
+
+    def _hat(self):
+        try:
+            return self.joy.get_hat(0)
+        except Exception:
+            return (0, 0)
+
+    def get_inputs(self):
+        """
+        Devuelve dict con: izq, der, salto, pausa, reiniciar, grafica
+        Compatible con teclado — se puede hacer OR con keys_held.
+        """
+        if not self.joy:
+            return {"izq": False, "der": False, "salto": False,
+                    "pausa": False, "reiniciar": False, "grafica": False}
+
+        ax0 = self._eje(0)   # izq horizontal
+        ax1 = self._eje(1)   # izq vertical (no usado para mover en juego)
+
+        hat = self._hat()
+        # Dpad hat: (x,y) donde x=-1/0/1, y=-1/0/1 (y=1 es arriba en pygame)
+        izq  = ax0 < -self.DEADZONE or hat[0] < 0
+        der  = ax0 >  self.DEADZONE or hat[0] > 0
+        # Salto: boton 0 (X/A) o dpad arriba (hat y=1) o boton 11/12 (dpad arriba en algunos)
+        salto = bool(self._btn(0) or hat[1] > 0 or self._btn(11))
+
+        # Pausa: botones 7(Start/Options) o 6(Select/Share) — borde ascendente
+        pausa_now = bool(self._btn(7) or self._btn(6))
+        pausa_trig = pausa_now and not self._prev_pausa
+        self._prev_pausa = pausa_now
+
+        # Reiniciar: boton 3 (Y/Triangulo)
+        r_now   = bool(self._btn(3))
+        r_trig  = r_now and not self._prev_r
+        self._prev_r = r_now
+
+        # Grafica: boton 2 (cuadrado/X)
+        grafica = bool(self._btn(2))
+
+        return {"izq": izq, "der": der, "salto": salto,
+                "pausa": pausa_trig, "reiniciar": r_trig,
+                "grafica": grafica}
+
+
+# ─────────────────────────────────────────────
 # SERIAL (hilo de fondo)
 # ─────────────────────────────────────────────
 class Serial:
@@ -1192,6 +1293,7 @@ class Juego:
         self.font_tiny  = pygame.font.SysFont("Consolas", 11)
 
         self.serial   = Serial()
+        self.gamepad  = GamepadUSB()
         self.jugador  = Jugador()
         self.cam_x    = 0.0
         self.cam_y    = 0.0
@@ -1323,11 +1425,15 @@ class Juego:
                     pygame.quit()
                     sys.exit()
 
+                # Reconectar gamepad USB si se conecta/desconecta
+                if event.type in (pygame.JOYDEVICEADDED, pygame.JOYDEVICEREMOVED):
+                    self.gamepad.reconectar()
+
                 if event.type == pygame.KEYDOWN:
                     keys_held.add(event.key)
                     if event.key == pygame.K_ESCAPE and self.modo_editor:
                         self.modo_editor = False
-                        self._recargar_nivel()  # envía NIVEL_START internamente
+                        self._recargar_nivel()
                     elif event.key == pygame.K_r and not self.modo_editor:
                         self._recargar_nivel()
                     elif event.key == pygame.K_TAB:
@@ -1376,10 +1482,20 @@ class Juego:
                     elif self.btn_pausa.clicked(mp):
                         self._toggle_pausa()
 
+            # Leer gamepad USB (fuera del bloque pausado para capturar pausa/reinicio)
+            gp = self.gamepad.get_inputs()
+            if gp["pausa"] and not self.modo_editor:
+                self._toggle_pausa()
+            if gp["reiniciar"] and not self.modo_editor:
+                self._recargar_nivel()
+            if gp["grafica"]:
+                pass  # toggle solo en flanco — se hace abajo si se desea
+
             if not self.modo_editor and not self.pausado:
-                izq   = pygame.K_LEFT  in keys_held or pygame.K_a in keys_held
-                der   = pygame.K_RIGHT in keys_held or pygame.K_d in keys_held
-                salto = pygame.K_SPACE in keys_held or pygame.K_UP in keys_held or pygame.K_w in keys_held
+                izq   = (pygame.K_LEFT  in keys_held or pygame.K_a in keys_held or gp["izq"])
+                der   = (pygame.K_RIGHT in keys_held or pygame.K_d in keys_held or gp["der"])
+                salto = (pygame.K_SPACE in keys_held or pygame.K_UP in keys_held
+                         or pygame.K_w in keys_held or gp["salto"])
 
                 self._actualizar_puertas()
 
@@ -1577,9 +1693,19 @@ class Juego:
             game_surf.blit(msg3, (GAME_W//2 - msg3.get_width()//2, GAME_H//2 + 40))
 
         # HUD controles
-        ctrl = "← → A D : moverse    SPACE W ↑ : saltar"
+        ctrl = "← → A D : moverse    SPACE W ↑ : saltar    P : pausa"
         c_surf = self.font_tiny.render(ctrl, True, (80, 80, 120))
         game_surf.blit(c_surf, (12, GAME_H - 20))
+
+        # Estado gamepad USB
+        if self.gamepad.conectado():
+            gp_txt  = f"🎮 {self.gamepad.nombre[:30]}"
+            gp_col  = C_OK
+        else:
+            gp_txt  = "Sin control USB"
+            gp_col  = (80, 80, 100)
+        gp_surf = self.font_tiny.render(gp_txt, True, gp_col)
+        game_surf.blit(gp_surf, (GAME_W - gp_surf.get_width() - 12, GAME_H - 20))
 
         # Editor superpuesto si esta activo
         if self.modo_editor and self.editor:
