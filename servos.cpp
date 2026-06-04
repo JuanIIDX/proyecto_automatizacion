@@ -3,9 +3,9 @@
 Canal canales[NUM_CANALES] = {
   {  0, -1, false, "Garra",          30, 110 },
   {  3, -1, false, "Brazo A",        10, 160 },
-  {  4, -1, false, "Brazo B",        10, 160 },
+  {  4, -1, false, "Brazo B",        10, 100 },
   {  8,  9, true,  "Rotacion-Brazo", 10, 160 },
-  { 12, -1, false, "Rotacion-Robot", 10, 160 },
+  { 12, -1, false, "Rotacion-Robot",  0, 180 },
   { 15, -1, false, "Auto15",          0, 180 },
 };
 
@@ -80,8 +80,10 @@ void servos_init()
 {
   for(int i = 0; i < NUM_CANALES; i++)
   {
-    posActual[i]        = canales[i].limMin;
-    selManual[i]        = canales[i].limMin;
+    // Rotacion-Robot (indice 4) arranca en limMax (180)
+    int inicio = (i == 4) ? canales[i].limMax : canales[i].limMin;
+    posActual[i]        = inicio;
+    selManual[i]        = inicio;
     ultimoMovimiento[i] = 0;
     pwmActivo[i]        = false;
     pca.setPWM(canales[i].numero, 0, 0);

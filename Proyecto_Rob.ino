@@ -625,6 +625,10 @@ void loopDebug()
 // CONTROL ANALOGICO
 // =========================
 
+// true = izq controla BrazoA y der controla BrazoB
+// false = izq controla BrazoB y der controla BrazoA (swap con Share)
+bool analogoSwap = false;
+
 void moverConVelocidad(int indice, int eje)
 {
   if(abs(eje) <= DEADZONE) return;
@@ -649,10 +653,11 @@ void loopAnalogico()
   if(chequearHome()) return;
 
   uint16_t botones = myGamepad->buttons();
+  uint8_t  misc    = myGamepad->miscButtons();
 
-  bool cir = (botones & 0x0002);
-  bool l1  = (botones & 0x0010);
-  bool r1  = (botones & 0x0020);
+  bool l1    = (botones & 0x0010);
+  bool r1    = (botones & 0x0020);
+  bool share = (misc    & 0x0002);
 
   int lx = myGamepad->axisX();
   int rx = myGamepad->axisRX();
@@ -661,23 +666,15 @@ void loopAnalogico()
 
   bool cambio = false;
 
-  if(cir && !cirAnt)
+  // Share = intercambiar analogos Brazo A / Brazo B
+  if(share && !cirAnt)
   {
-    for(int i = 0; i < NUM_CANALES - 1; i++)
-    {
-      pca.setPWM(canales[i].numero, 0, 0);
-      if(canales[i].numeroB != -1)
-        pca.setPWM(canales[i].numeroB, 0, 0);
-      pwmActivo[i] = false;
-    }
+    analogoSwap = !analogoSwap;
     cambio = true;
   }
+  cirAnt = share;
 
-  cirAnt = cir;
-  l1Ant  = l1;
-  r1Ant  = r1;
-
-  // Garra L2/R2
+  // Garra L2/R2 (indice 0)
   if(l2 > 50)
   {
     posActual[0] = constrain(posActual[0] - map(l2, 50, 1023, 1, 4), canales[0].limMin, canales[0].limMax);
@@ -691,20 +688,40 @@ void loopAnalogico()
     cambio = true;
   }
 
-  // Analogo izq
+  // Analogo izquierdo → BrazoB(2) o BrazoA(1) segun swap
+  int indiceLx = analogoSwap ? 1 : 2;
   if(abs(lx) > DEADZONE)
   {
-    if(l1) moverConVelocidad(3, lx);
-    else   moverConVelocidad(1, lx);
+    moverConVelocidad(indiceLx, lx);
     cambio = true;
   }
 
-  // Analogo der
+  // Analogo derecho → BrazoA(1) o BrazoB(2) segun swap
+  int indiceRx = analogoSwap ? 2 : 1;
   if(abs(rx) > DEADZONE)
   {
-    if(r1) moverConVelocidad(4, rx);
-    else   moverConVelocidad(2, rx);
+    moverConVelocidad(indiceRx, rx);
     cambio = true;
+  }
+
+  // L1/R1 = Rotacion-Robot (indice 4) muy lento
+  static unsigned long ultimoRotRobot = 0;
+  if(millis() - ultimoRotRobot >= 40)
+  {
+    if(l1)
+    {
+      posActual[4] = constrain(posActual[4] - 2, canales[4].limMin, canales[4].limMax);
+      moverCanalCompleto(4, posActual[4]);
+      ultimoRotRobot = millis();
+      cambio = true;
+    }
+    else if(r1)
+    {
+      posActual[4] = constrain(posActual[4] + 2, canales[4].limMin, canales[4].limMax);
+      moverCanalCompleto(4, posActual[4]);
+      ultimoRotRobot = millis();
+      cambio = true;
+    }
   }
 
   if(cambio) actualizarSnap();
@@ -739,10 +756,10 @@ void setup()
   attachInterrupt(digitalPinToInterrupt(0), emergenciaISR, FALLING);
   delay(1000);
 
-  Wire.begin(21, 22);
+  Wire.begin(4, 5);
   pantalla_init();
 
-  I2CPCA.begin(26, 25);
+  I2CPCA.begin(16, 17);
   pca.begin();
   pca.setPWMFreq(50);
 
@@ -811,17 +828,26 @@ void loop()
 
   verificarTimeoutPWM();
 
-  // Enviar angulos al PC cada 100ms
+  // Enviar datos al PC cada 100ms
   static unsigned long ultimoEnvio = 0;
   if(millis() - ultimoEnvio >= 100)
   {
     ultimoEnvio = millis();
+
+    // Angulos
     Serial.print("ANGULOS:");
-    Serial.print(posActual[0]); Serial.print(",");  // Garra
-    Serial.print(posActual[1]); Serial.print(",");  // Brazo A
-    Serial.print(posActual[2]); Serial.print(",");  // Brazo B
-    Serial.print(posActual[3]); Serial.print(",");  // Rotacion-Brazo
-    Serial.print(posActual[4]); Serial.print(",");  // Rotacion-Robot
-    Serial.println(posAuto15);                      // Canal 15
+    Serial.print(posActual[0]); Serial.print(",");
+    Serial.print(posActual[1]); Serial.print(",");
+    Serial.print(posActual[2]); Serial.print(",");
+    Serial.print(posActual[3]); Serial.print(",");
+    Serial.print(posActual[4]); Serial.print(",");
+    Serial.println(posAuto15);
+
+    // Sensores IR (GPIO 32, 33, 34, 35)
+    Serial.print("IR:");
+    Serial.print(analogRead(32)); Serial.print(",");
+    Serial.print(analogRead(33)); Serial.print(",");
+    Serial.print(analogRead(34)); Serial.print(",");
+    Serial.println(analogRead(35));
   }
 }
