@@ -15,3 +15,4 @@ void pantalla_config(int indiceCanal, bool ctrOk);
 void pantalla_debug(int indiceCanal, int pos, int sel, bool ctrOk, bool mostrarNumero, int delayMs = 20);
 void pantalla_debug_auto(int pos, bool ctrOk);
 void pantalla_analogico(bool ctrOk);
+void pantalla_homing(const char* nombre, int pos, int target, int paso, int total, bool ctrOk);

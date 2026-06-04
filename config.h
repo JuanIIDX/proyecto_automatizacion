@@ -17,13 +17,16 @@
 #define MODO_ANALOGICO 3
 #define MODO_CONFIG    4
 #define MODO_DEBUG     5
+#define MODO_HOMING    6
 
-// Opciones del menu
-#define MENU_PROGRAMA  0
-#define MENU_JUEGO     1
-#define MENU_CONTROL   2
-#define MENU_DEBUG     3
-#define MENU_TOTAL     4
+// Intervalo entre pasos del homing (ms) — mas alto = mas lento
+#define HOMING_INTERVALO 18
+
+// Opciones del menu (lista horizontal, se desplaza con dpad izq/der)
+#define MENU_CONTROL   0
+#define MENU_DEBUG     1
+#define MENU_HOMING    2
+#define MENU_TOTAL     3
 
 // Deadzone analogicos
 #define DEADZONE 30

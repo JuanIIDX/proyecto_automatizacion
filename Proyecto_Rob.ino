@@ -1,4 +1,5 @@
 #include <Wire.h>
+#include <string.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <Adafruit_PWMServoDriver.h>
@@ -63,8 +64,12 @@ struct EstadoPantalla
   // auto15
   int  posAuto15;
   int  debugDelay;
-  // config
-  // (usa canales[] directamente — protegido por mutex)
+  // homing
+  char homingNombre[20];
+  int  homingPos;
+  int  homingTarget;
+  int  homingPaso;
+  int  homingTotal;
 };
 
 volatile bool pantallaActualizar = false;
@@ -132,6 +137,16 @@ void tareaPantalla(void* param)
               s.debugMostrarNumero,
               s.debugDelay
             );
+          break;
+        case MODO_HOMING:
+          pantalla_homing(
+            s.homingNombre,
+            s.homingPos,
+            s.homingTarget,
+            s.homingPaso,
+            s.homingTotal,
+            s.ctrOk
+          );
           break;
       }
     }
@@ -206,34 +221,25 @@ void loopMenu()
     return;
   }
 
+  uint8_t dpad = myGamepad->dpad();
   uint16_t botones = myGamepad->buttons();
-  uint8_t  dpad    = myGamepad->dpad();
 
-  bool dpadU = (dpad & 0x01);
-  bool dpadD = (dpad & 0x02);
   bool dpadR = (dpad & 0x04);
   bool dpadL = (dpad & 0x08);
   bool x     = (botones & 0x0001);
 
   bool cambio = false;
 
-  if(dpadR && !dpadRAnt) { if(menuSel % 2 == 0) menuSel++; cambio = true; }
-  if(dpadL && !dpadLAnt) { if(menuSel % 2 == 1) menuSel--; cambio = true; }
-  if(dpadD && !dpadDAnt) { if(menuSel < 2) menuSel += 2;   cambio = true; }
-  if(dpadU && !dpadUAnt) { if(menuSel >= 2) menuSel -= 2;  cambio = true; }
+  if(dpadR && !dpadRAnt) { if(menuSel < MENU_TOTAL - 1) menuSel++; cambio = true; }
+  if(dpadL && !dpadLAnt) { if(menuSel > 0)              menuSel--; cambio = true; }
 
   if(x && !xAnt)
   {
     switch(menuSel)
     {
-      case MENU_PROGRAMA:
-      case MENU_JUEGO:
-        break;
-
       case MENU_CONTROL:
         if(!ctrOk())
         {
-          // Aviso sin bloquear — lo dibujamos directamente
           oled.clearDisplay();
           oled.setTextColor(SSD1306_WHITE);
           navbar(false);
@@ -248,7 +254,8 @@ void loopMenu()
         }
         else
         {
-          modo = MODO_ANALOGICO;
+          iniciarHoming(true);   // al terminar entra en Control
+          modo = MODO_HOMING;
           cambio = true;
         }
         break;
@@ -257,13 +264,17 @@ void loopMenu()
         modo = MODO_DEBUG;
         cambio = true;
         break;
+
+      case MENU_HOMING:
+        iniciarHoming(false);   // al terminar vuelve al menu
+        modo = MODO_HOMING;
+        cambio = true;
+        break;
     }
   }
 
   if(cambio) actualizarSnap();
 
-  dpadUAnt = dpadU;
-  dpadDAnt = dpadD;
   dpadRAnt = dpadR;
   dpadLAnt = dpadL;
   xAnt     = x;
@@ -622,6 +633,130 @@ void loopDebug()
 }
 
 // =========================
+// HOMING — restauracion lenta al entrar en Control
+// =========================
+
+// Secuencia: { indice_canal, target }
+struct HomingPaso { int indice; int target; const char* nombre; };
+static const HomingPaso HOMING_SEQ[] = {
+  { 4, 180, "Rotacion Robot" },
+  { 2, 100, "Brazo B"        },
+  { 1,  90, "Brazo A"        },
+};
+static const int HOMING_TOTAL = 3;
+
+int  homingPasoActual      = 0;
+unsigned long homingUltimo = 0;
+int  homingDistInicial[HOMING_TOTAL] = {0, 0, 0};
+bool homingIrAControl      = false;  // true = al terminar entra en Control, false = vuelve al menu
+
+void resetearBotones()
+{
+  triAnt   = false;
+  cirAnt   = false;
+  xAnt     = false;
+  cuadAnt  = false;
+  l1Ant    = false;
+  r1Ant    = false;
+  homeAnt  = false;
+  dpadUAnt = false;
+  dpadDAnt = false;
+  dpadRAnt = false;
+  dpadLAnt = false;
+}
+
+void iniciarHoming(bool irAControl)
+{
+  homingPasoActual  = 0;
+  homingUltimo      = 0;
+  homingIrAControl  = irAControl;
+  for(int i = 0; i < HOMING_TOTAL; i++)
+    homingDistInicial[i] = 0;
+}
+
+void actualizarSnapHoming(const char* nombre, int pos, int target, int paso, int total)
+{
+  if(xSemaphoreTake(mutexOled, pdMS_TO_TICKS(10)))
+  {
+    snapPantalla.modo        = MODO_HOMING;
+    snapPantalla.ctrOk       = ctrOk();
+    strncpy(snapPantalla.homingNombre, nombre, sizeof(snapPantalla.homingNombre) - 1);
+    snapPantalla.homingNombre[sizeof(snapPantalla.homingNombre) - 1] = '\0';
+    snapPantalla.homingPos    = pos;
+    snapPantalla.homingTarget = target;
+    snapPantalla.homingPaso   = paso;
+    snapPantalla.homingTotal  = total;
+    xSemaphoreGive(mutexOled);
+  }
+  solicitarPantalla();
+}
+
+// Devuelve true cuando termino toda la secuencia
+bool tickHoming()
+{
+  if(homingPasoActual >= HOMING_TOTAL)
+    return true;
+
+  unsigned long ahora = millis();
+  if(ahora - homingUltimo < HOMING_INTERVALO)
+    return false;
+  homingUltimo = ahora;
+
+  const HomingPaso& p = HOMING_SEQ[homingPasoActual];
+  int idx    = p.indice;
+  int target = p.target;
+  int actual = posActual[idx];
+
+  if(actual < target)
+    actual++;
+  else if(actual > target)
+    actual--;
+
+  posActual[idx] = actual;
+  selManual[idx] = actual;
+  moverCanalCompleto(idx, actual);
+
+  // Progreso: guardamos la distancia inicial la primera vez que tocamos cada paso
+  if(homingDistInicial[homingPasoActual] == 0)
+    homingDistInicial[homingPasoActual] = max(abs(target - actual) + 1, 1);
+
+  int distInicial = homingDistInicial[homingPasoActual];
+  int paso        = distInicial - abs(target - actual);
+
+  actualizarSnapHoming(p.nombre, actual, target, paso, distInicial);
+
+  if(actual == target)
+  {
+    homingDistInicial[homingPasoActual] = 0;  // resetear para la proxima vez que se ejecute homing
+    homingPasoActual++;
+  }
+
+  return (homingPasoActual >= HOMING_TOTAL);
+}
+
+void loopHoming()
+{
+  BP32.update();
+
+  // El boton Home cancela el homing y vuelve al menu
+  if(chequearHome())
+  {
+    resetearBotones();
+    return;
+  }
+
+  if(tickHoming())
+  {
+    resetearBotones();
+    if(homingIrAControl)
+      modo = MODO_ANALOGICO;
+    else
+      modo = MODO_MENU;
+    actualizarSnap();
+  }
+}
+
+// =========================
 // CONTROL ANALOGICO
 // =========================
 
@@ -645,6 +780,10 @@ void moverConVelocidad(int indice, int eje)
 
 void loopAnalogico()
 {
+  static unsigned long ultimoTickAnalogico = 0;
+  if(millis() - ultimoTickAnalogico < 20) return;
+  ultimoTickAnalogico = millis();
+
   BP32.update();
 
   bool ok = ctrOk();
@@ -704,20 +843,20 @@ void loopAnalogico()
     cambio = true;
   }
 
-  // L1/R1 = Rotacion-Robot (indice 4) muy lento
+  // L1/R1 = Rotacion-Robot (indice 4)
   static unsigned long ultimoRotRobot = 0;
   if(millis() - ultimoRotRobot >= 40)
   {
     if(l1)
     {
-      posActual[4] = constrain(posActual[4] - 2, canales[4].limMin, canales[4].limMax);
+      posActual[4] = constrain(posActual[4] - 4, canales[4].limMin, canales[4].limMax);
       moverCanalCompleto(4, posActual[4]);
       ultimoRotRobot = millis();
       cambio = true;
     }
     else if(r1)
     {
-      posActual[4] = constrain(posActual[4] + 2, canales[4].limMin, canales[4].limMax);
+      posActual[4] = constrain(posActual[4] + 4, canales[4].limMin, canales[4].limMax);
       moverCanalCompleto(4, posActual[4]);
       ultimoRotRobot = millis();
       cambio = true;
@@ -725,8 +864,6 @@ void loopAnalogico()
   }
 
   if(cambio) actualizarSnap();
-
-  delay(20);
 }
 
 // =========================
@@ -821,6 +958,7 @@ void loop()
     case MODO_ANALOGICO: loopAnalogico(); break;
     case MODO_CONFIG:    loopConfig();    break;
     case MODO_DEBUG:     loopDebug();     break;
+    case MODO_HOMING:    loopHoming();    break;
   }
 
   // Canal 15 siempre girando

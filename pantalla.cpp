@@ -93,59 +93,81 @@ void navbar(bool ctrConectado)
 
 void pantalla_menu(int seleccion)
 {
+  // Menu horizontal: 3 opciones, se muestran 2 a la vez.
+  // Si sel=0: se ven 0 y 1. Si sel=1: se ven 0 y 1. Si sel=2: se ven 1 y 2.
+  // El cuadro seleccionado siempre aparece en pantalla.
+
   oled.clearDisplay();
   oled.setTextColor(SSD1306_WHITE);
-
   navbar(true);
 
-  // 4 cuadros en grilla 2x2
-  // Cada cuadro: 60x24 px, margen 2px
-  // Fila 0: y = NAVBAR_H + 2
-  // Fila 1: y = NAVBAR_H + 2 + 26
+  const char* titulos[MENU_TOTAL]    = { "Control", "Debug",   "Homing"   };
+  const char* subtitulos[MENU_TOTAL] = { "Robot",   "Pruebas", "Posicion" };
 
-  const char* titulos[MENU_TOTAL] = {
-    "Programa",
-    "Juego",
-    "Control",
-    "Debug"
-  };
+  // Cuales dos cuadros mostrar
+  int primerVisible = (seleccion >= 2) ? 1 : 0;
 
-  const char* subtitulos[MENU_TOTAL] = {
-    "En desarrollo",
-    "En desarrollo",
-    "Robot",
-    "Pruebas"
-  };
+  // Dimensiones de cada cuadro — dos cuadros llenan la pantalla
+  int margen = 3;
+  int w      = (128 - margen * 3) / 2;   // ~60px cada uno
+  int h      = 64 - NAVBAR_H - margen * 2;
+  int y      = NAVBAR_H + margen;
 
-  for(int i = 0; i < MENU_TOTAL; i++)
+  for(int slot = 0; slot < 2; slot++)
   {
-    int col = i % 2;
-    int row = i / 2;
+    int idx = primerVisible + slot;
+    if(idx >= MENU_TOTAL) break;
 
-    int x = 2 + col * 63;
-    int y = NAVBAR_H + 2 + row * 26;
-    int w = 60;
-    int h = 24;
+    int x = margen + slot * (w + margen);
+    bool sel = (idx == seleccion);
 
-    // Borde: relleno si seleccionado, solo borde si no
-    if(i == seleccion)
+    if(sel)
       oled.fillRect(x, y, w, h, SSD1306_WHITE);
     else
       oled.drawRect(x, y, w, h, SSD1306_WHITE);
 
-    // Texto: invertido si seleccionado
-    oled.setTextColor(i == seleccion ? SSD1306_BLACK : SSD1306_WHITE);
+    oled.setTextColor(sel ? SSD1306_BLACK : SSD1306_WHITE);
 
+    // Titulo centrado, texto grande
     oled.setTextSize(1);
-    oled.setCursor(x + 3, y + 4);
-    oled.print(titulos[i]);
+    int tx = x + (w - (int)strlen(titulos[idx]) * 6) / 2;
+    oled.setCursor(tx, y + 10);
+    oled.print(titulos[idx]);
 
-    oled.setTextSize(1);
-    oled.setCursor(x + 3, y + 14);
-    oled.print(subtitulos[i]);
+    // Subtitulo centrado, texto pequeño
+    int sx = x + (w - (int)strlen(subtitulos[idx]) * 6) / 2;
+    oled.setCursor(sx, y + 24);
+    oled.print(subtitulos[idx]);
   }
 
+  // Indicador de navegacion: flechas laterales si hay mas opciones
   oled.setTextColor(SSD1306_WHITE);
+  if(primerVisible > 0)
+  {
+    // Flecha izquierda
+    oled.setCursor(0, y + h / 2 - 3);
+    oled.print("<");
+  }
+  if(primerVisible + 2 < MENU_TOTAL)
+  {
+    // Flecha derecha
+    oled.setCursor(122, y + h / 2 - 3);
+    oled.print(">");
+  }
+
+  // Indicador de posicion (puntos en la parte inferior)
+  int dotY = 62;
+  int dotSpacing = 8;
+  int dotStartX = 64 - (MENU_TOTAL * dotSpacing) / 2;
+  for(int i = 0; i < MENU_TOTAL; i++)
+  {
+    int dx = dotStartX + i * dotSpacing;
+    if(i == seleccion)
+      oled.fillCircle(dx, dotY, 2, SSD1306_WHITE);
+    else
+      oled.drawCircle(dx, dotY, 2, SSD1306_WHITE);
+  }
+
   oled.display();
 }
 
@@ -313,6 +335,42 @@ void pantalla_debug_select(int indiceCanal, bool ctrOk)
   }
 
   oled.setTextColor(SSD1306_WHITE);
+  oled.display();
+}
+
+void pantalla_homing(const char* nombre, int pos, int target, int paso, int total, bool ctrOk)
+{
+  oled.clearDisplay();
+  oled.setTextColor(SSD1306_WHITE);
+  navbar(ctrOk);
+
+  oled.setTextSize(1);
+  oled.setCursor(0, NAVBAR_H + 2);
+  oled.print("RESTAURANDO...");
+
+  // Nombre del canal
+  oled.setCursor(0, NAVBAR_H + 14);
+  oled.print(nombre);
+
+  // Posicion actual y objetivo
+  oled.setTextSize(2);
+  oled.setCursor(0, NAVBAR_H + 26);
+  oled.print(pos);
+  oled.setTextSize(1);
+  oled.print(" -> ");
+  oled.setTextSize(2);
+  oled.print(target);
+
+  // Barra de progreso
+  int barW = 124;
+  int barY = NAVBAR_H + 50;
+  oled.drawRect(2, barY, barW, 8, SSD1306_WHITE);
+  int fill = 0;
+  if(total > 0)
+    fill = map(paso, 0, total, 0, barW - 2);
+  if(fill > 0)
+    oled.fillRect(3, barY + 1, fill, 6, SSD1306_WHITE);
+
   oled.display();
 }
 
