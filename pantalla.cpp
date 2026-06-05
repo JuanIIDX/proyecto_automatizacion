@@ -104,32 +104,33 @@ void navbar(bool ctrConectado)
 
 void pantalla_menu(int seleccion)
 {
-  // Menu horizontal: 3 opciones, se muestran 2 a la vez.
-  // Si sel=0: se ven 0 y 1. Si sel=1: se ven 0 y 1. Si sel=2: se ven 1 y 2.
-  // El cuadro seleccionado siempre aparece en pantalla.
+  // Menu horizontal: 4 opciones, se muestran 3 a la vez.
+  // La ventana visible se desplaza para mantener el seleccionado visible.
 
   oled.clearDisplay();
   oled.setTextColor(SSD1306_WHITE);
   navbar(true);
 
-  const char* titulos[MENU_TOTAL]    = { "Control", "Debug",   "Homing"   };
-  const char* subtitulos[MENU_TOTAL] = { "Robot",   "Pruebas", "Posicion" };
+  const char* titulos[MENU_TOTAL]    = { "Control", "Debug",   "Homing",   "Ctrl PC" };
+  const char* subtitulos[MENU_TOTAL] = { "Robot",   "Pruebas", "Pos.",     "PC" };
 
-  // Cuales dos cuadros mostrar
-  int primerVisible = (seleccion >= 2) ? 1 : 0;
+  // Ventana de 3 cuadros — desplazar para mantener seleccion visible
+  int primerVisible = seleccion - 1;
+  if(primerVisible < 0)              primerVisible = 0;
+  if(primerVisible + 3 > MENU_TOTAL) primerVisible = MENU_TOTAL - 3;
 
-  // Dimensiones de cada cuadro — dos cuadros llenan la pantalla
-  int margen = 3;
-  int w      = (128 - margen * 3) / 2;   // ~60px cada uno
-  int h      = 64 - NAVBAR_H - margen * 2;
+  // Dimensiones: 3 cuadros en 128px con margenes de 2px
+  int margen = 2;
+  int w      = (128 - margen * 4) / 3;   // ~38px cada uno
+  int h      = 64 - NAVBAR_H - margen * 2 - 6;  // dejar 6px abajo para puntos
   int y      = NAVBAR_H + margen;
 
-  for(int slot = 0; slot < 2; slot++)
+  for(int slot = 0; slot < 3; slot++)
   {
     int idx = primerVisible + slot;
     if(idx >= MENU_TOTAL) break;
 
-    int x = margen + slot * (w + margen);
+    int x   = margen + slot * (w + margen);
     bool sel = (idx == seleccion);
 
     if(sel)
@@ -138,38 +139,28 @@ void pantalla_menu(int seleccion)
       oled.drawRect(x, y, w, h, SSD1306_WHITE);
 
     oled.setTextColor(sel ? SSD1306_BLACK : SSD1306_WHITE);
-
-    // Titulo centrado, texto grande
     oled.setTextSize(1);
-    int tx = x + (w - (int)strlen(titulos[idx]) * 6) / 2;
-    oled.setCursor(tx, y + 10);
-    oled.print(titulos[idx]);
 
-    // Subtitulo centrado, texto pequeño
-    int sx = x + (w - (int)strlen(subtitulos[idx]) * 6) / 2;
-    oled.setCursor(sx, y + 24);
-    oled.print(subtitulos[idx]);
-  }
+    // Titulo centrado (puede que no quepa todo — usar subtitulo corto si no)
+    const char* lbl = (strlen(titulos[idx]) * 6 <= (unsigned)w) ? titulos[idx] : subtitulos[idx];
+    int tx = x + (w - (int)strlen(lbl) * 6) / 2;
+    oled.setCursor(tx, y + 8);
+    oled.print(lbl);
 
-  // Indicador de navegacion: flechas laterales si hay mas opciones
-  oled.setTextColor(SSD1306_WHITE);
-  if(primerVisible > 0)
-  {
-    // Flecha izquierda
-    oled.setCursor(0, y + h / 2 - 3);
-    oled.print("<");
-  }
-  if(primerVisible + 2 < MENU_TOTAL)
-  {
-    // Flecha derecha
-    oled.setCursor(122, y + h / 2 - 3);
-    oled.print(">");
+    // Subtitulo solo si hay espacio (cuadro > 36px)
+    if(w > 36)
+    {
+      int sx = x + (w - (int)strlen(subtitulos[idx]) * 6) / 2;
+      oled.setCursor(sx, y + 20);
+      oled.print(subtitulos[idx]);
+    }
   }
 
   // Indicador de posicion (puntos en la parte inferior)
-  int dotY = 62;
+  oled.setTextColor(SSD1306_WHITE);
+  int dotY       = 62;
   int dotSpacing = 8;
-  int dotStartX = 64 - (MENU_TOTAL * dotSpacing) / 2;
+  int dotStartX  = 64 - (MENU_TOTAL * dotSpacing) / 2;
   for(int i = 0; i < MENU_TOTAL; i++)
   {
     int dx = dotStartX + i * dotSpacing;
@@ -381,6 +372,47 @@ void pantalla_homing(const char* nombre, int pos, int target, int paso, int tota
     fill = map(paso, 0, total, 0, barW - 2);
   if(fill > 0)
     oled.fillRect(3, barY + 1, fill, 6, SSD1306_WHITE);
+
+  oled.display();
+}
+
+void pantalla_ctrl_pc(bool ctrOk)
+{
+  oled.clearDisplay();
+  oled.setTextColor(SSD1306_WHITE);
+  navbar(ctrOk);
+
+  // Titulo
+  oled.setTextSize(1);
+  int tx = (128 - 12 * 6) / 2;
+  oled.setCursor(tx, NAVBAR_H + 2);
+  oled.print("-- CTRL PC --");
+
+  // Posiciones de los 4 canales principales en dos columnas
+  // Izquierda: BrzA (1), BrzB (2)   Derecha: RBrz (3), RRob (4)
+  oled.setCursor(0,  NAVBAR_H + 14);
+  oled.print("BrzA:");
+  oled.print(posActual[1]);
+
+  oled.setCursor(64, NAVBAR_H + 14);
+  oled.print("BrzB:");
+  oled.print(posActual[2]);
+
+  oled.setCursor(0,  NAVBAR_H + 26);
+  oled.print("RBrz:");
+  oled.print(posActual[3]);
+
+  oled.setCursor(64, NAVBAR_H + 26);
+  oled.print("RRob:");
+  oled.print(posActual[4]);
+
+  // Garra en linea separada
+  oled.setCursor(0,  NAVBAR_H + 38);
+  oled.print("Garra:");
+  oled.print(posActual[0]);
+
+  oled.setCursor(0, NAVBAR_H + 52);
+  oled.print("HOME=menu");
 
   oled.display();
 }

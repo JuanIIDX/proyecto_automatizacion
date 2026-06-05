@@ -10,6 +10,11 @@
 #include "servos.h"
 #include "pantalla.h"
 
+// Declarado aqui para que procesarComandoSerial (que aparece antes
+// de las variables globales) pueda escribirlo sin error de scope.
+// El loop() lo lee y aplica el cambio de modo.
+int cmdModoPendiente = -1;
+
 // Hardware
 Adafruit_SSD1306        oled(128, 64, &Wire, -1);
 TwoWire                 I2CPCA = TwoWire(1);
@@ -251,7 +256,6 @@ void procesarComandoSerial(const String& linea)
 
   if(cmd == "NIVEL_START")         relojIniciaNivel();
   else if(cmd == "NIVEL_START_RESUME") {
-    // Reanudar sin resetear relojPausadoMs
     relojModo      = RELOJ_NORMAL;
     relojCorriendo = true;
     relojInicio    = millis();
@@ -259,6 +263,28 @@ void procesarComandoSerial(const String& linea)
   else if(cmd == "NIVEL_END")      relojFin();
   else if(cmd == "EDIT")           relojModoEdicion();
   else if(cmd == "PAUSA")          relojModoPausa();
+  else if(cmd == "MODO_CTRL_PC")     cmdModoPendiente = MODO_CTRL_PC;
+  else if(cmd == "MODO_CTRL_PC_OFF") cmdModoPendiente = MODO_MENU;
+  else if(cmd == "AGARRAR_CENTRO")   iniciarSecuenciaAgarrar();
+  else if(cmd.startsWith("SET_MOTOR:"))
+  {
+    // Formato: SET_MOTOR:indice_canal:grados
+    int p1 = cmd.indexOf(':', 10);
+    if(p1 > 0)
+    {
+      int idx = cmd.substring(10, p1).toInt();
+      int val = cmd.substring(p1 + 1).toInt();
+      if(idx >= 0 && idx < NUM_CANALES)
+      {
+        posActual[idx] = constrain(val, canales[idx].limMin, canales[idx].limMax);
+        selManual[idx] = posActual[idx];
+        moverCanalCompleto(idx, posActual[idx]);
+        Serial.print("DBG SET_MOTOR idx="); Serial.print(idx);
+        Serial.print(" val="); Serial.print(val);
+        Serial.print(" posActual="); Serial.println(posActual[idx]);
+      }
+    }
+  }
 }
 
 // Gamepad
@@ -269,6 +295,7 @@ int  modo        = MODO_MENU;
 int  menuSel     = 0;
 int  indiceCanal = 0;
 bool pcaOk       = false;
+
 
 // Estado botones
 bool triAnt   = false;
@@ -390,6 +417,9 @@ void tareaPantalla(void* param)
           s.ctrOk
         );
         break;
+      case MODO_CTRL_PC:
+        pantalla_ctrl_pc(s.ctrOk);
+        break;
     }
 
     // ~15 FPS para la pantalla — suficiente y sin sobrecargar I2C
@@ -497,7 +527,7 @@ void loopMenu()
         }
         else
         {
-          iniciarHoming(true);   // al terminar entra en Control
+          iniciarHoming(MODO_ANALOGICO);
           modo = MODO_HOMING;
           cambio = true;
         }
@@ -509,7 +539,13 @@ void loopMenu()
         break;
 
       case MENU_HOMING:
-        iniciarHoming(false);   // al terminar vuelve al menu
+        iniciarHoming(MODO_MENU);
+        modo = MODO_HOMING;
+        cambio = true;
+        break;
+
+      case MENU_CTRL_PC:
+        iniciarHoming(MODO_CTRL_PC);
         modo = MODO_HOMING;
         cambio = true;
         break;
@@ -891,7 +927,7 @@ static const int HOMING_TOTAL = 3;
 int  homingPasoActual      = 0;
 unsigned long homingUltimo = 0;
 int  homingDistInicial[HOMING_TOTAL] = {0, 0, 0};
-bool homingIrAControl      = false;  // true = al terminar entra en Control, false = vuelve al menu
+int  homingModoDest        = MODO_MENU;  // modo al que se va al terminar homing
 
 void resetearBotones()
 {
@@ -908,11 +944,11 @@ void resetearBotones()
   dpadLAnt = false;
 }
 
-void iniciarHoming(bool irAControl)
+void iniciarHoming(int modoDest)
 {
   homingPasoActual  = 0;
   homingUltimo      = 0;
-  homingIrAControl  = irAControl;
+  homingModoDest    = modoDest;
   for(int i = 0; i < HOMING_TOTAL; i++)
     homingDistInicial[i] = 0;
 }
@@ -950,18 +986,23 @@ bool tickHoming()
   int target = p.target;
   int actual = posActual[idx];
 
-  if(actual < target)
-    actual++;
-  else if(actual > target)
-    actual--;
+  // Guardar distancia inicial la primera vez (incluye si ya esta en target)
+  if(homingDistInicial[homingPasoActual] == 0)
+  {
+    // Si ya esta en el target, forzar igualmente el PWM durante al menos 20 ticks
+    // para asegurar que el servo fisico llegue ahi
+    homingDistInicial[homingPasoActual] = max(abs(target - actual), 20);
+    // Enviar posicion target de inmediato para que el servo empiece a moverse
+    moverCanalCompleto(idx, actual);
+  }
+
+  // Mover un paso hacia el target
+  if(actual < target)       actual++;
+  else if(actual > target)  actual--;
 
   posActual[idx] = actual;
   selManual[idx] = actual;
   moverCanalCompleto(idx, actual);
-
-  // Progreso: guardamos la distancia inicial la primera vez que tocamos cada paso
-  if(homingDistInicial[homingPasoActual] == 0)
-    homingDistInicial[homingPasoActual] = max(abs(target - actual) + 1, 1);
 
   int distInicial = homingDistInicial[homingPasoActual];
   int paso        = distInicial - abs(target - actual);
@@ -970,7 +1011,7 @@ bool tickHoming()
 
   if(actual == target)
   {
-    homingDistInicial[homingPasoActual] = 0;  // resetear para la proxima vez que se ejecute homing
+    homingDistInicial[homingPasoActual] = 0;
     homingPasoActual++;
   }
 
@@ -991,12 +1032,63 @@ void loopHoming()
   if(tickHoming())
   {
     resetearBotones();
-    if(homingIrAControl)
-      modo = MODO_ANALOGICO;
-    else
-      modo = MODO_MENU;
+    modo = homingModoDest;
     actualizarSnap();
   }
+}
+
+// =========================
+// MODO CTRL PC
+// =========================
+
+// Garra: 70 grados = ABIERTA  /  110 grados = CERRADA
+
+// ── Secuencia "Agarrar centro" ────────────────────────────────
+// Cada paso: { indice_canal, grados_objetivo, delay_antes_del_siguiente_ms }
+struct PasoSecuencia { int indice; int grados; unsigned long espera; };
+
+static const PasoSecuencia SEQ_AGARRAR[] = {
+  { 4,  90,  900 },   // 1. Rotacion  → 90°
+  { 1, 160,  900 },   // 2. BrazoA    → 160°
+  { 2,  25,  900 },   // 3. BrazoB    → 25°
+  { 0,  70,  700 },   // 4. Garra     → 70° (abierta)
+  { 1, 129,  900 },   // 5. BrazoA    → 129°
+  { 0, 110,    0 },   // 6. Garra     → 110° (cerrada, ultimo)
+};
+static const int SEQ_AGARRAR_TOTAL = 6;
+
+int           seqPaso        = -1;   // -1 = inactivo
+unsigned long seqProximoMs   = 0;
+
+void tickSecuencia()
+{
+  if(seqPaso < 0 || seqPaso >= SEQ_AGARRAR_TOTAL) return;
+  if(millis() < seqProximoMs) return;
+
+  const PasoSecuencia& p = SEQ_AGARRAR[seqPaso];
+  posActual[p.indice] = constrain(p.grados,
+                                   canales[p.indice].limMin,
+                                   canales[p.indice].limMax);
+  selManual[p.indice] = posActual[p.indice];
+  moverCanalCompleto(p.indice, posActual[p.indice]);
+  actualizarSnap();
+
+  seqProximoMs = millis() + p.espera;
+  seqPaso++;
+  if(seqPaso >= SEQ_AGARRAR_TOTAL) seqPaso = -1;
+}
+
+void iniciarSecuenciaAgarrar()
+{
+  seqPaso      = 0;
+  seqProximoMs = millis();   // primer paso inmediato
+}
+
+void loopCtrlPC()
+{
+  BP32.update();
+  if(chequearHome()) { seqPaso = -1; return; }
+  actualizarSnap();
 }
 
 // =========================
@@ -1182,7 +1274,7 @@ void setup()
 
   tm.setBrightness(5);
   tm.clear();
-  relojIniciaNivel();
+  relojModoPausa();   // parpadea al inicio hasta que Python envie NIVEL_START_RESUME
 
   I2CPCA.begin(16, 17);
 
@@ -1249,6 +1341,24 @@ void setup()
 
 void loop()
 {
+  // Aplicar cambio de modo pedido desde serial
+  if(cmdModoPendiente >= 0)
+  {
+    int dest = cmdModoPendiente;
+    cmdModoPendiente = -1;
+    if(dest == MODO_CTRL_PC)
+    {
+      // Homing antes de entrar a Ctrl PC, igual que desde el menu fisico
+      iniciarHoming(MODO_CTRL_PC);
+      modo = MODO_HOMING;
+    }
+    else
+    {
+      modo = dest;
+    }
+    actualizarSnap();
+  }
+
   // Leer comandos del PC — no bloqueante, caracter a caracter
   static String bufSerial = "";
   while(Serial.available())
@@ -1284,6 +1394,9 @@ void loop()
     Serial.println("EMERGENCIA: motores apagados");
   }
 
+  // Secuencia no bloqueante — corre en cualquier modo
+  tickSecuencia();
+
   switch(modo)
   {
     case MODO_MENU:      loopMenu();      break;
@@ -1293,6 +1406,7 @@ void loop()
     case MODO_CONFIG:    loopConfig();    break;
     case MODO_DEBUG:     loopDebug();     break;
     case MODO_HOMING:    loopHoming();    break;
+    case MODO_CTRL_PC:   loopCtrlPC();    break;
   }
 
   // Canal 15 siempre girando

@@ -16,3 +16,4 @@ void pantalla_debug(int indiceCanal, int pos, int sel, bool ctrOk, bool mostrarN
 void pantalla_debug_auto(int pos, bool ctrOk);
 void pantalla_analogico(bool ctrOk);
 void pantalla_homing(const char* nombre, int pos, int target, int paso, int total, bool ctrOk);
+void pantalla_ctrl_pc(bool ctrOk);

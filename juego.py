@@ -186,16 +186,17 @@ class Jugador:
     def rect(self):
         return pygame.Rect(int(self.x), int(self.y), self.W, self.H)
 
-    def update(self, izq, der, salto, doors, segmentos_brazo=None):
+    def update(self, izq, der, salto, doors, segmentos_brazo=None, correr=False):
+        spd = SPD * 2 if correr else SPD
         self.vx = 0
-        if izq: self.vx = -SPD; self.cara = -1
-        if der: self.vx =  SPD; self.cara =  1
+        if izq: self.vx = -spd; self.cara = -1
+        if der: self.vx =  spd; self.cara =  1
         if salto and self.suelo:
             self.vy = JUMP_V
             self.suelo = False
 
         if izq or der:
-            self.anim += 0.25
+            self.anim += 0.35 if correr else 0.25
         else:
             self.anim = 0
 
@@ -308,6 +309,54 @@ class Jugador:
         ox = 8 if self.cara == 1 else 4
         pygame.draw.ellipse(surf, (255, 255, 255), (x+ox, y+8, 8, 8))
         pygame.draw.ellipse(surf, (0, 0, 0),       (x+ox+2+(self.cara), y+10, 4, 4))
+
+
+# ─────────────────────────────────────────────
+# EFECTO BUSQUEDA (tecla C)
+# ─────────────────────────────────────────────
+class EfectoBusqueda:
+    """
+    Al activarse lanza 3 anillos concéntricos que se expanden
+    como ondas de agua y desaparecen suavemente.
+    """
+    DURACION  = 1000   # ms total de cada onda
+    MAX_R     = 120    # radio máximo en px
+    N_ANILLOS = 3
+    DELAY     = 180    # ms entre anillos
+    COLOR     = (180, 230, 255)
+
+    def __init__(self):
+        self.ondas = []   # lista de {"t0": ms_inicio, "wx": x_mundo, "wy": y_mundo}
+
+    def activar(self, wx, wy):
+        t = pygame.time.get_ticks()
+        for i in range(self.N_ANILLOS):
+            self.ondas.append({"t0": t + i * self.DELAY, "wx": wx, "wy": wy})
+
+    def update(self):
+        t = pygame.time.get_ticks()
+        self.ondas = [o for o in self.ondas if t - o["t0"] < self.DURACION]
+
+    def draw(self, surf, cam_x, cam_y):
+        t = pygame.time.get_ticks()
+        for o in self.ondas:
+            elapsed = t - o["t0"]
+            if elapsed < 0:
+                continue
+            frac  = max(0.0, min(1.0, elapsed / self.DURACION))
+            r     = int(self.MAX_R * frac)
+            inv   = max(0.0, 1.0 - frac)
+            alpha = int(255 * inv * inv)            # desvanece cuadratico
+            if r < 2 or alpha < 5:
+                continue
+            sx = int(o["wx"] - cam_x)
+            sy = int(o["wy"] - cam_y)
+            # Dibujamos con una surface temporal para soporte de alpha
+            diam = r * 2 + 4
+            tmp  = pygame.Surface((diam, diam), pygame.SRCALPHA)
+            cr   = (self.COLOR[0], self.COLOR[1], self.COLOR[2], alpha)
+            pygame.draw.circle(tmp, cr, (r + 2, r + 2), r, max(1, 3 - int(frac*2)))
+            surf.blit(tmp, (sx - r - 2, sy - r - 2))
 
 
 # ─────────────────────────────────────────────
@@ -1295,6 +1344,8 @@ class Juego:
         self.serial   = Serial()
         self.gamepad  = GamepadUSB()
         self.jugador  = Jugador()
+        self.efecto_b = EfectoBusqueda()
+        self._c_ant   = False   # borde ascendente de C
         self.cam_x    = 0.0
         self.cam_y    = 0.0
         self.modo_editor  = False
@@ -1321,12 +1372,34 @@ class Juego:
         self.btn_n2     = Boton(746, 8, 70,  32, "Nivel 2", (40, 40, 100))
         self.btn_n3     = Boton(822, 8, 70,  32, "Nivel 3", (40, 40, 100))
         self.btn_edit   = Boton(902,  8, 110, 32, "Editar Mapa", (80, 40, 80))
-        self.btn_pausa  = Boton(1020, 8,  80, 32, "⏸ Pausa",    (60, 60, 20))
+        self.btn_pausa   = Boton(1020, 8,  80, 32, "⏸ Pausa",    (60, 60, 20))
+        self.btn_ctrl_pc = Boton(1108, 8,  90, 32, "Control PC", (40, 80, 40))
 
         self.btns_navbar = [self.btn_prev, self.btn_next, self.btn_refr,
                             self.btn_con, self.btn_discon,
                             self.btn_n1, self.btn_n2, self.btn_n3,
-                            self.btn_edit, self.btn_pausa]
+                            self.btn_edit, self.btn_pausa, self.btn_ctrl_pc]
+
+        # Botones Control PC (panel lateral, visibles cuando ctrl_pc activo)
+        _bw, _bh, _bx = 260, 34, 20
+        self.modo_ctrl_pc = False
+        self.btns_ctrl_pc = [
+            Boton(_bx, 0, _bw, _bh, "Recojer inicio",  (60, 80, 60)),
+            Boton(_bx, 0, _bw, _bh, "Ir a verde",      (40, 160, 70)),
+            Boton(_bx, 0, _bw, _bh, "Ir a amarillo",   (160, 140, 20)),
+            Boton(_bx, 0, _bw, _bh, "Ir a rojo",       (160, 40,  40)),
+            Boton(_bx, 0, _bw, _bh, "Ir a centro A",   (40,  80, 160)),
+            Boton(_bx, 0, _bw, _bh, "Ir a centro B",   (40, 100, 160)),
+            Boton(_bx, 0, _bw, _bh, "Ir a azul",       (40,  60, 200)),
+        ]
+
+        self._panel_btn_ctrl_pc_rect = pygame.Rect(0, 0, 0, 0)
+        self._panel_btn_agarrar_rect = pygame.Rect(0, 0, 0, 0)
+
+        # Sliders Control PC: valores actuales de A, B, R, X
+        # Se sincronizan con los angulos recibidos del ESP32
+        self._slider_dragging = None  # indice del slider en drag, o None
+        self._slider_rects    = []    # rects de las pistas (coordenadas pantalla)
 
         self._recargar_nivel()
         self._refrescar_puertos()
@@ -1409,6 +1482,14 @@ class Juego:
             target = (1.0 - frac) * d["h"]
             d["open_h"] += (target - d["open_h"]) * 0.08
 
+    def _slider_mover(self, mouse_x):
+        if self._slider_dragging is None or self._slider_dragging >= len(self._slider_rects):
+            return
+        sd    = self._slider_rects[self._slider_dragging]
+        frac  = max(0.0, min(1.0, (mouse_x - sd["sl_x"]) / max(sd["sl_w"], 1)))
+        val   = int(sd["lo"] + frac * (sd["hi"] - sd["lo"]))
+        self.serial.enviar_cmd(f"SET_MOTOR:{sd['idx']}:{val}")
+
     def run(self):
         keys_held = set()
 
@@ -1448,8 +1529,23 @@ class Juego:
                 if self.modo_editor and self.editor:
                     self.editor.handle_event(event)
 
+                if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                    if self._slider_dragging is not None:
+                        self._slider_dragging = None
+
+                if event.type == pygame.MOUSEMOTION:
+                    if self._slider_dragging is not None:
+                        self._slider_mover(event.pos[0])
+
                 if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                     mp = event.pos
+                    # Sliders Control PC
+                    if self.modo_ctrl_pc:
+                        for si, sd in enumerate(self._slider_rects):
+                            if sd["rect"].collidepoint(mp):
+                                self._slider_dragging = si
+                                self._slider_mover(mp[0])
+                                break
                     if self.btn_prev.clicked(mp):
                         self.puerto_sel = (self.puerto_sel - 1) % max(len(self.puertos), 1)
                     elif self.btn_next.clicked(mp):
@@ -1481,6 +1577,22 @@ class Juego:
                             self._recargar_nivel()
                     elif self.btn_pausa.clicked(mp):
                         self._toggle_pausa()
+                    elif self.btn_ctrl_pc.clicked(mp):
+                        self.modo_ctrl_pc = not self.modo_ctrl_pc
+                        cmd = "MODO_CTRL_PC" if self.modo_ctrl_pc else "MODO_CTRL_PC_OFF"
+                        self.serial.enviar_cmd(cmd)
+                    else:
+                        # Botones panel lateral inferior
+                        if hasattr(self, "_panel_btn_ctrl_pc_rect") and self._panel_btn_ctrl_pc_rect.collidepoint(mp):
+                            self.modo_ctrl_pc = not self.modo_ctrl_pc
+                            cmd = "MODO_CTRL_PC" if self.modo_ctrl_pc else "MODO_CTRL_PC_OFF"
+                            self.serial.enviar_cmd(cmd)
+                        elif hasattr(self, "_panel_btn_agarrar_rect") and self._panel_btn_agarrar_rect.collidepoint(mp):
+                            self.serial.enviar_cmd("AGARRAR_CENTRO")
+                        elif self.modo_ctrl_pc:
+                            for i, b in enumerate(self.btns_ctrl_pc):
+                                if b.rect.collidepoint(mp):
+                                    self.serial.enviar_cmd(f"CTRL_PC:{i}")
 
             # Leer gamepad USB (fuera del bloque pausado para capturar pausa/reinicio)
             gp = self.gamepad.get_inputs()
@@ -1492,10 +1604,21 @@ class Juego:
                 pass  # toggle solo en flanco — se hace abajo si se desea
 
             if not self.modo_editor and not self.pausado:
-                izq   = (pygame.K_LEFT  in keys_held or pygame.K_a in keys_held or gp["izq"])
-                der   = (pygame.K_RIGHT in keys_held or pygame.K_d in keys_held or gp["der"])
-                salto = (pygame.K_SPACE in keys_held or pygame.K_UP in keys_held
-                         or pygame.K_w in keys_held or gp["salto"])
+                izq    = (pygame.K_LEFT  in keys_held or pygame.K_a in keys_held or gp["izq"])
+                der    = (pygame.K_RIGHT in keys_held or pygame.K_d in keys_held or gp["der"])
+                salto  = (pygame.K_SPACE in keys_held or pygame.K_UP in keys_held
+                          or pygame.K_w in keys_held or pygame.K_x in keys_held or gp["salto"])
+                correr = (pygame.K_z in keys_held)
+
+                # Tecla C — efecto búsqueda (borde ascendente)
+                c_now = pygame.K_c in keys_held
+                if c_now and not self._c_ant:
+                    cx_mund = self.jugador.x + self.jugador.W // 2
+                    cy_mund = self.jugador.y + self.jugador.H // 2
+                    self.efecto_b.activar(cx_mund, cy_mund)
+                self._c_ant = c_now
+
+                self.efecto_b.update()
 
                 self._actualizar_puertas()
 
@@ -1509,7 +1632,7 @@ class Juego:
                 segs = []
                 for br in self.brazos:
                     segs.extend(br.get_plataformas())
-                self.jugador.update(izq, der, salto, self.doors, segs or None)
+                self.jugador.update(izq, der, salto, self.doors, segs or None, correr)
 
                 # Recolectar tesoros
                 jr = self.jugador.rect()
@@ -1635,6 +1758,9 @@ class Juego:
                                      (tx2, ty2, t["w"], t["h"]), 2, border_radius=4)
                     pygame.draw.rect(game_surf, (255, 240, 180),
                                      (tx2+5, ty2+5, t["w"]//3, t["h"]//3), border_radius=2)
+
+        # Efecto busqueda (debajo del jugador)
+        self.efecto_b.draw(game_surf, cx, cy)
 
         # Brazos robot
         for br in self.brazos:
@@ -1824,10 +1950,67 @@ class Juego:
 
         py += bar_h + 70
 
-        pygame.draw.line(panel, (50, 70, 120), (10, py), (PANEL_W-10, py), 1)
-        py += 10
+        # ── Sliders de control manual A, B, R, X (solo en modo Ctrl PC) ──
+        if self.modo_ctrl_pc:
+            t2 = self.font_med.render("CONTROL PC", True, (255, 200, 50))
+            panel.blit(t2, (PANEL_W//2 - t2.get_width()//2, py))
+            py += 26
 
-        # Barras IR
+            slider_nombres = ["A", "B", "R", "X"]
+            slider_indices = [STAT_INDICES[n] for n in slider_nombres]
+
+            with self.serial.lock:
+                angulos_ctrl = list(self.serial.angulos)
+
+            sl_x   = 36
+            sl_w   = PANEL_W - sl_x - 12
+            sl_h   = 8
+            sl_gap = 34
+            knob_r = 7
+
+            self._slider_rects = []
+            for si, (nombre, idx) in enumerate(zip(slider_nombres, slider_indices)):
+                lo, hi = STAT_LIMITES[nombre]
+                color  = STAT_COLORS[nombre]
+                val    = angulos_ctrl[idx]
+                frac   = max(0.0, min(1.0, (val - lo) / max(hi - lo, 1)))
+                kx     = sl_x + int(frac * sl_w)
+                ky     = py + sl_h // 2
+
+                lbl = self.font_med.render(nombre, True, color)
+                panel.blit(lbl, (4, py - 2))
+
+                pygame.draw.rect(panel, C_DARK, (sl_x, py, sl_w, sl_h), border_radius=4)
+                if kx > sl_x:
+                    pygame.draw.rect(panel, color, (sl_x, py, kx - sl_x, sl_h), border_radius=4)
+                pygame.draw.circle(panel, color, (kx, ky), knob_r)
+                pygame.draw.circle(panel, (220, 220, 255), (kx, ky), knob_r, 2)
+
+                vt = self.font_tiny.render(str(val), True, C_TEXT)
+                panel.blit(vt, (sl_x + sl_w + 4, py - 1))
+
+                rng = self.font_tiny.render(f"{lo}-{hi}", True, (80, 80, 110))
+                panel.blit(rng, (sl_x, py + sl_h + 3))
+
+                self._slider_rects.append({
+                    "rect": pygame.Rect(GAME_W + sl_x - knob_r, py - knob_r,
+                                        sl_w + knob_r * 2, sl_h + knob_r * 2),
+                    "sl_x": GAME_W + sl_x,
+                    "sl_w": sl_w,
+                    "nombre": nombre,
+                    "idx": idx,
+                    "lo": lo,
+                    "hi": hi,
+                })
+                py += sl_gap
+
+            py += 8
+            pygame.draw.line(panel, (50, 70, 120), (10, py), (PANEL_W-10, py), 1)
+            py += 10
+        else:
+            self._slider_rects = []
+
+        # ── Barras IR (siempre visibles) ───────────────────────────
         t2 = self.font_med.render("SENSORES IR", True, (255, 200, 50))
         panel.blit(t2, (PANEL_W//2 - t2.get_width()//2, py))
         py += 28
@@ -1853,7 +2036,6 @@ class Juego:
                                  border_radius=4)
             pygame.draw.rect(panel, color_ir, (bx, py, bar_w, bar_h_ir), 2, border_radius=4)
 
-            # Umbral 1000 marcado
             umbral_y = py + bar_h_ir - int(bar_h_ir * 1000/4095)
             pygame.draw.line(panel, (255,255,255), (bx, umbral_y), (bx+bar_w, umbral_y), 1)
 
@@ -1863,19 +2045,50 @@ class Juego:
             vt = self.font_med.render(str(val), True, C_TEXT)
             panel.blit(vt, (bx + bar_w//2 - vt.get_width()//2, py + bar_h_ir + 30))
 
-        py += bar_h_ir + 56
+        py += bar_h_ir + 44
+        py += 12
 
-        # Leyenda puertas
+        # ── Botones panel inferior ──────────────────────────────
         pygame.draw.line(panel, (50, 70, 120), (10, py), (PANEL_W-10, py), 1)
-        py += 8
-        leg = self.font_small.render("0=cerrada  1000+=abierta", True, (150,150,150))
-        panel.blit(leg, (PANEL_W//2 - leg.get_width()//2, py))
-        py += 18
-        nombres_door = ["Verde", "Amarillo", "Rojo", "Azul"]
-        for i, nd in enumerate(nombres_door):
-            pygame.draw.rect(panel, DOOR_COLORS[i], (12, py + i*18, 14, 12), border_radius=2)
-            nt = self.font_tiny.render(f"IR{i+1} - {nd}", True, C_TEXT)
-            panel.blit(nt, (32, py + i*18))
+        py += 10
+
+        _bw2 = PANEL_W - 24
+        _bx2 = 12
+
+        # Boton Control PC (toggle)
+        ctrl_color = (40, 120, 40) if self.modo_ctrl_pc else (40, 80, 40)
+        ctrl_rect  = pygame.Rect(_bx2, py, _bw2, 32)
+        pygame.draw.rect(panel, ctrl_color, ctrl_rect, border_radius=5)
+        pygame.draw.rect(panel, (200, 200, 220), ctrl_rect, 1, border_radius=5)
+        ctrl_lbl = self.font_small.render("Control PC", True, (230, 230, 230))
+        panel.blit(ctrl_lbl, (ctrl_rect.x + ctrl_rect.w//2 - ctrl_lbl.get_width()//2,
+                               ctrl_rect.y + ctrl_rect.h//2 - ctrl_lbl.get_height()//2))
+        # Guardar rect en coordenadas de pantalla para detectar clicks
+        self._panel_btn_ctrl_pc_rect = pygame.Rect(GAME_W + _bx2, py, _bw2, 32)
+        py += 38
+
+        # Sub-botones de Control PC — solo visibles cuando está activo
+        self._panel_btn_agarrar_rect = pygame.Rect(0, 0, 0, 0)  # oculto por defecto
+        if self.modo_ctrl_pc:
+            # Boton Agarrar centro
+            agr_rect = pygame.Rect(_bx2, py, _bw2, 32)
+            pygame.draw.rect(panel, (80, 60, 140), agr_rect, border_radius=5)
+            pygame.draw.rect(panel, (200, 200, 220), agr_rect, 1, border_radius=5)
+            agr_lbl = self.font_small.render("Agarrar centro", True, (230, 230, 230))
+            panel.blit(agr_lbl, (agr_rect.x + agr_rect.w//2 - agr_lbl.get_width()//2,
+                                  agr_rect.y + agr_rect.h//2 - agr_lbl.get_height()//2))
+            self._panel_btn_agarrar_rect = pygame.Rect(GAME_W + _bx2, py, _bw2, 32)
+            py += 38
+
+            for i, b in enumerate(self.btns_ctrl_pc):
+                b_rect = pygame.Rect(_bx2, py, _bw2, 30)
+                pygame.draw.rect(panel, b.color, b_rect, border_radius=4)
+                pygame.draw.rect(panel, (200, 200, 220), b_rect, 1, border_radius=4)
+                txt_b = self.font_tiny.render(b.texto, True, (230, 230, 230))
+                panel.blit(txt_b, (b_rect.x + b_rect.w//2 - txt_b.get_width()//2,
+                                   b_rect.y + b_rect.h//2 - txt_b.get_height()//2))
+                b.rect = pygame.Rect(GAME_W + _bx2, py, _bw2, 30)
+                py += 34
 
         s.blit(panel, (GAME_W, 0))
 
