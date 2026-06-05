@@ -1437,6 +1437,10 @@ void loop()
     Serial.print(analogRead(35)); Serial.print(",");
     Serial.println(analogRead(34));
 
+    // Sensor MQ-3 alcohol (GPIO25)
+    Serial.print("MQ3:");
+    Serial.println(analogRead(25));
+
     // Temperatura interna del ESP32
     float tempC = temperatureRead();
     Serial.print("TEMP:");

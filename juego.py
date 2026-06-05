@@ -468,6 +468,7 @@ class Serial:
         self.angulos   = [0] * 6
         self.ir        = [0] * 4
         self.temp      = 0.0
+        self.mq3       = 0
         self.ser       = None
         self.corriendo = False
         self.estado    = "Sin conectar"
@@ -522,6 +523,12 @@ class Serial:
                     if len(p) == 4:
                         with self.lock:
                             self.ir = [int(x) for x in p]
+                elif linea.startswith("MQ3:"):
+                    try:
+                        with self.lock:
+                            self.mq3 = int(linea[4:])
+                    except ValueError:
+                        pass
                 elif linea.startswith("TEMP:"):
                     try:
                         with self.lock:
@@ -1893,12 +1900,27 @@ class Juego:
         # Temperatura ESP32
         with self.serial.lock:
             temp = self.serial.temp
+            mq3  = self.serial.mq3
         temp_col = (C_OK if temp < 60 else
                     (255, 200, 50) if temp < 75 else
                     C_ERROR)
         temp_txt = self.font_small.render(f"CPU: {temp:.1f}°C", True, temp_col)
         panel.blit(temp_txt, (PANEL_W//2 - temp_txt.get_width()//2, py))
-        py += 18
+        py += 16
+
+        # MQ-3 alcohol — barra horizontal
+        # 0-4095 raw ADC; umbral de alerta ~1500
+        mq3_frac = max(0.0, min(1.0, mq3 / 4095.0))
+        mq3_col  = (C_OK if mq3 < 1000 else
+                    (255, 200, 50) if mq3 < 2000 else
+                    C_ERROR)
+        mq3_lbl = self.font_tiny.render(f"MQ-3: {mq3}", True, mq3_col)
+        panel.blit(mq3_lbl, (10, py))
+        py += 13
+        bar_mq3_w = PANEL_W - 20
+        pygame.draw.rect(panel, C_DARK,  (10, py, bar_mq3_w, 7), border_radius=3)
+        pygame.draw.rect(panel, mq3_col, (10, py, int(bar_mq3_w * mq3_frac), 7), border_radius=3)
+        py += 14
 
         pygame.draw.line(panel, (50, 70, 120), (10, py), (PANEL_W-10, py), 1)
         py += 10
